@@ -1,0 +1,44 @@
+# =============================================================
+# frontend/.dockerignore
+# Build context: ./frontend  (docker build -f frontend/Dockerfile ./frontend)
+# =============================================================
+
+# --- Node dependencies (được cài lại bằng npm ci trong builder) ---
+node_modules/
+.npm/
+
+# --- Build output (được tạo lại bằng npm run build trong builder) ---
+.next/
+out/
+
+# --- File môi trường nhạy cảm ---
+# NEXT_PUBLIC_* vars truyền qua --build-arg khi docker build
+# Biến runtime server-side truyền qua docker run -e hoặc docker-compose
+.env
+.env.*
+!.env.example
+
+# --- TypeScript build cache (không cần trong image) ---
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# --- IDE và hệ điều hành ---
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+Thumbs.db
+
+# --- Log files ---
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Harness và planning (nội bộ dev process) ---
+.harness/
+.planning/
+
+# --- README (không cần trong image) ---
+README.md
