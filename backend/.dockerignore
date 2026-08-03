@@ -1,0 +1,60 @@
+# =============================================================
+# backend/.dockerignore
+# Build context: ./backend  (docker build -f backend/Dockerfile ./backend)
+# =============================================================
+
+# --- Python artifacts (không cần trong image) ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# --- Virtual environments (image dùng uv sync thay thế) ---
+.venv/
+venv/
+env/
+
+# --- File môi trường nhạy cảm ---
+# .env chứa secret keys, API keys — TUYỆT ĐỐI không copy vào image
+# Truyền qua docker run --env-file hoặc docker-compose env_file
+.env
+.env.*
+!.env.example
+
+# --- Database và uploads (mount volume ở runtime) ---
+# Không bake data vào image; dùng volume để persist
+data/
+uploads/
+
+# --- Test và dev files (không cần trong production image) ---
+tests/
+test_*.py
+conftest.py
+pytest.ini
+.pytest_cache/
+
+# --- Công cụ phân tích / debug (chỉ dùng locally) ---
+query_db.py
+test_ai.py
+
+# --- Alembic migrations (cần thiết — KHÔNG bỏ vào đây) ---
+# alembic/ và alembic.ini được COPY vào image để chạy migrations
+
+# --- IDE và hệ điều hành ---
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+Thumbs.db
+
+# --- Harness và planning (nội bộ dev process) ---
+.harness/
+.planning/
+
+# --- Log files ---
+*.log
+logs/
