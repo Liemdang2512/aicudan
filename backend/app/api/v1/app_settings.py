@@ -26,12 +26,20 @@ class AppSettingsResponse(BaseModel):
     telegram_bot_token_set: bool
     gemini_api_key_masked: str
     telegram_bot_token_masked: str
+    payment_management_unit: str
+    payment_bank_account: str
+    payment_bank_name: str
+    payment_account_holder: str
     runtime_sync_notice: str = RUNTIME_SYNC_NOTICE
 
 
 class UpdateSettingsRequest(BaseModel):
     gemini_api_key: str | None = None
     telegram_bot_token: str | None = None
+    payment_management_unit: str | None = None
+    payment_bank_account: str | None = None
+    payment_bank_name: str | None = None
+    payment_account_holder: str | None = None
 
 
 class ValidateSettingsRequest(BaseModel):
@@ -137,6 +145,10 @@ async def get_settings(
         telegram_bot_token_set=bool(telegram_token and not telegram_token.startswith("your-")),
         gemini_api_key_masked=_mask_key(gemini_key),
         telegram_bot_token_masked=_mask_key(telegram_token),
+        payment_management_unit=settings.PAYMENT_MANAGEMENT_UNIT,
+        payment_bank_account=settings.PAYMENT_BANK_ACCOUNT,
+        payment_bank_name=settings.PAYMENT_BANK_NAME,
+        payment_account_holder=settings.PAYMENT_ACCOUNT_HOLDER,
     )
 
 
@@ -163,6 +175,19 @@ async def update_settings(
         settings.TELEGRAM_BOT_TOKEN = data.telegram_bot_token
         os.environ["TELEGRAM_BOT_TOKEN"] = data.telegram_bot_token
 
+    simple_fields = {
+        "payment_management_unit": "PAYMENT_MANAGEMENT_UNIT",
+        "payment_bank_account": "PAYMENT_BANK_ACCOUNT",
+        "payment_bank_name": "PAYMENT_BANK_NAME",
+        "payment_account_holder": "PAYMENT_ACCOUNT_HOLDER",
+    }
+    for attr, env_key in simple_fields.items():
+        value = getattr(data, attr)
+        if value is not None:
+            _update_env_file(env_key, value)
+            setattr(settings, env_key, value)
+            os.environ[env_key] = value
+
     if any(credential is not None for credential in credentials.values()):
         logger.info(
             "Provider credentials updated; other worker processes require restart to sync"
@@ -173,6 +198,10 @@ async def update_settings(
         telegram_bot_token_set=bool(settings.TELEGRAM_BOT_TOKEN and not settings.TELEGRAM_BOT_TOKEN.startswith("your-")),
         gemini_api_key_masked=_mask_key(settings.GEMINI_API_KEY),
         telegram_bot_token_masked=_mask_key(settings.TELEGRAM_BOT_TOKEN),
+        payment_management_unit=settings.PAYMENT_MANAGEMENT_UNIT,
+        payment_bank_account=settings.PAYMENT_BANK_ACCOUNT,
+        payment_bank_name=settings.PAYMENT_BANK_NAME,
+        payment_account_holder=settings.PAYMENT_ACCOUNT_HOLDER,
     )
 
 

@@ -920,9 +920,29 @@ export default function InvoicesPage() {
             </div>
 
             <DialogFooter className="gap-2 sm:gap-0">
-              <Button variant="outline" onClick={() => window.print()} className="gap-1 text-xs">
+              <Button
+                variant="outline"
+                className="gap-1 text-xs"
+                onClick={async () => {
+                  try {
+                    const blob = await apiDownload(`/invoices/${selectedInvoice.id}/pdf`)
+                    const url = window.URL.createObjectURL(blob)
+                    const a = document.createElement("a")
+                    a.href = url
+                    const month = selectedInvoice.invoice_month.replace("-", "")
+                    const room = (selectedInvoice.room_number || "phong").replace(/\s/g, "_")
+                    a.download = `hoa-don-${room}-${month}.pdf`
+                    document.body.appendChild(a)
+                    a.click()
+                    window.URL.revokeObjectURL(url)
+                    document.body.removeChild(a)
+                  } catch {
+                    toast({ title: "Lỗi xuất PDF", description: "Không thể tải hóa đơn PDF", variant: "destructive" })
+                  }
+                }}
+              >
                 <Printer className="h-3.5 w-3.5" />
-                In Hóa Đơn
+                Xuất PDF
               </Button>
               <Button onClick={() => setSelectedInvoice(null)} className="text-xs">
                 Đóng

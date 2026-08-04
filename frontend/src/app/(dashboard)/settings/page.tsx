@@ -11,6 +11,7 @@ import {
   MessageCircle,
   CheckCircle2,
   XCircle,
+  Building2,
 } from "lucide-react"
 import {
   Card,
@@ -79,6 +80,13 @@ export default function SettingsPage() {
   const [telegramKeySet, setTelegramKeySet] = useState(false)
   const [telegramMasked, setTelegramMasked] = useState("")
 
+  // Payment info state
+  const [paymentUnit, setPaymentUnit] = useState("")
+  const [paymentBankAccount, setPaymentBankAccount] = useState("")
+  const [paymentBankName, setPaymentBankName] = useState("")
+  const [paymentAccountHolder, setPaymentAccountHolder] = useState("")
+  const [paymentSaving, setPaymentSaving] = useState(false)
+
   useEffect(() => {
     fetchPriceConfigs()
     fetchAppSettings()
@@ -89,9 +97,17 @@ export default function SettingsPage() {
       const data = await apiGet<{
         telegram_bot_token_set: boolean
         telegram_bot_token_masked: string
+        payment_management_unit: string
+        payment_bank_account: string
+        payment_bank_name: string
+        payment_account_holder: string
       }>("/settings")
       setTelegramKeySet(data.telegram_bot_token_set)
       setTelegramMasked(data.telegram_bot_token_masked)
+      setPaymentUnit(data.payment_management_unit || "")
+      setPaymentBankAccount(data.payment_bank_account || "")
+      setPaymentBankName(data.payment_bank_name || "")
+      setPaymentAccountHolder(data.payment_account_holder || "")
     } catch {
       // Settings API might not be available yet
     }
@@ -121,6 +137,31 @@ export default function SettingsPage() {
       })
     } finally {
       setConfigSaving(false)
+    }
+  }
+
+  const handleSavePayment = async () => {
+    setPaymentSaving(true)
+    try {
+      await apiPatch("/settings", {
+        payment_management_unit: paymentUnit,
+        payment_bank_account: paymentBankAccount,
+        payment_bank_name: paymentBankName,
+        payment_account_holder: paymentAccountHolder,
+      })
+      toast({
+        title: "Lưu thành công",
+        description: "Thông tin thanh toán đã được cập nhật",
+        variant: "success",
+      })
+    } catch (error) {
+      toast({
+        title: "Lỗi",
+        description: error instanceof Error ? error.message : "Không thể lưu thông tin thanh toán",
+        variant: "destructive",
+      })
+    } finally {
+      setPaymentSaving(false)
     }
   }
 
@@ -432,6 +473,66 @@ export default function SettingsPage() {
 
       {/* API Configurations */}
       <div className="grid gap-6">
+        {/* Payment info for PDF invoice */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Building2 className="h-5 w-5" />
+              Thông tin thanh toán (hiển thị trên hóa đơn PDF)
+            </CardTitle>
+            <CardDescription>
+              Thông tin ngân hàng và đơn vị quản lý để in trên hóa đơn gửi cư dân
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>Đơn vị quản lý</Label>
+                <Input
+                  value={paymentUnit}
+                  onChange={(e) => setPaymentUnit(e.target.value)}
+                  placeholder="Ví dụ: Công Ty Cổ Phần SAVISTA"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Số tài khoản ngân hàng</Label>
+                <Input
+                  value={paymentBankAccount}
+                  onChange={(e) => setPaymentBankAccount(e.target.value)}
+                  placeholder="Ví dụ: 113 002 965 007"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Tên ngân hàng</Label>
+                <Input
+                  value={paymentBankName}
+                  onChange={(e) => setPaymentBankName(e.target.value)}
+                  placeholder="Ví dụ: VIETINBANK-CN2-TPHCM"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Chủ tài khoản</Label>
+                <Input
+                  value={paymentAccountHolder}
+                  onChange={(e) => setPaymentAccountHolder(e.target.value)}
+                  placeholder="Ví dụ: Công Ty Cổ Phần SAVISTA"
+                />
+              </div>
+            </div>
+            <Button
+              disabled={paymentSaving}
+              onClick={handleSavePayment}
+            >
+              {paymentSaving ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Settings className="mr-2 h-4 w-4" />
+              )}
+              Lưu thông tin thanh toán
+            </Button>
+          </CardContent>
+        </Card>
+
         {/* Telegram Bot Token */}
         <Card>
           <CardHeader>

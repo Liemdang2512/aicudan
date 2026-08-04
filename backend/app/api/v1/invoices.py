@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.db.session import get_db
 from app.models.building import Building
 from app.models.invoice import Invoice
@@ -23,6 +24,7 @@ from app.schemas.invoice import (
     InvoiceResponse,
 )
 from app.services.billing_service import calculate_invoice
+from app.services.pdf_service import generate_invoice_pdf
 
 router = APIRouter(prefix="/invoices", tags=["Invoices"])
 
@@ -323,6 +325,55 @@ async def get_invoice(
         raise HTTPException(status_code=404, detail="Hóa đơn không tồn tại")
     invoice, room = row
     return _invoice_response(invoice, room)
+
+
+@router.get("/{invoice_id}/pdf")
+async def download_invoice_pdf(
+    invoice_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(Invoice, Room)
+        .join(Room, Invoice.room_id == Room.id)
+        .join(Building, Room.building_id == Building.id)
+        .where(
+            Invoice.id == invoice_id,
+            Building.owner_id == current_user.id,
+        )
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Hóa đơn không tồn tại")
+    invoice, room = row
+
+    pdf_bytes = generate_invoice_pdf(
+        invoice_id=invoice.id,
+        invoice_month=invoice.invoice_month,
+        room_number=room.room_number,
+        resident_name=room.resident_name,
+        previous_reading=invoice.previous_reading,
+        current_reading=invoice.current_reading,
+        consumption=invoice.consumption,
+        price_breakdown_json=invoice.price_breakdown,
+        electricity_amount=invoice.electricity_amount,
+        additional_fees_json=invoice.additional_fees,
+        total_amount=invoice.total_amount,
+        management_unit=settings.PAYMENT_MANAGEMENT_UNIT,
+        bank_account=settings.PAYMENT_BANK_ACCOUNT,
+        bank_name=settings.PAYMENT_BANK_NAME,
+        account_holder=settings.PAYMENT_ACCOUNT_HOLDER,
+    )
+
+    month_safe = invoice.invoice_month.replace("-", "")
+    room_safe = room.room_number.replace(" ", "_").replace("/", "-")
+    filename = f"hoa-don-{room_safe}-{month_safe}.pdf"
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
 
 
 @router.get("/export/excel")

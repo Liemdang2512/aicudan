@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_WEBHOOK_SECRET: str = ""
 
+    # Invoice payment info (shown on PDF invoice)
+    PAYMENT_MANAGEMENT_UNIT: str = ""
+    PAYMENT_BANK_ACCOUNT: str = ""
+    PAYMENT_BANK_NAME: str = ""
+    PAYMENT_ACCOUNT_HOLDER: str = ""
+
     # Upload
     UPLOAD_DIR: str = "./uploads"
     MAX_FILE_SIZE: int = 5 * 1024 * 1024  # 5MB
