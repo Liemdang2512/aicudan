@@ -59,6 +59,7 @@ class Settings(BaseSettings):
 
     # Telegram Bot
     TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_WEBHOOK_SECRET: str = ""
 
     # Upload
     UPLOAD_DIR: str = "./uploads"

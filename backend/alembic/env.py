@@ -7,7 +7,16 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 from app.core.config import settings
 from app.db.base import Base
-from app.models import batch_job, building, invoice, price_config, reading, room, user  # noqa: F401
+from app.models import (  # noqa: F401
+    batch_job,
+    bot_session,
+    building,
+    invoice,
+    price_config,
+    reading,
+    room,
+    user,
+)
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL.replace("%", "%%"))

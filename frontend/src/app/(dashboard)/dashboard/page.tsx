@@ -82,6 +82,7 @@ export default function DashboardPage() {
       color: "text-blue-600",
       bgColor: "bg-blue-100 dark:bg-blue-900/30",
       description: `${stats?.total_buildings ?? 0} tòa nhà`,
+      href: "/buildings",
     },
     {
       title: "Đã ghi",
@@ -90,6 +91,7 @@ export default function DashboardPage() {
       color: "text-green-600",
       bgColor: "bg-green-100 dark:bg-green-900/30",
       description: "Chỉ số đã xác nhận",
+      href: "/readings?status=approved",
     },
     {
       title: "Chưa ghi",
@@ -98,6 +100,7 @@ export default function DashboardPage() {
       color: "text-yellow-600",
       bgColor: "bg-yellow-100 dark:bg-yellow-900/30",
       description: "Đang chờ xử lý",
+      href: "/readings?status=pending",
     },
     {
       title: "Lỗi",
@@ -106,6 +109,7 @@ export default function DashboardPage() {
       color: "text-red-600",
       bgColor: "bg-red-100 dark:bg-red-900/30",
       description: "Cần kiểm tra lại",
+      href: "/readings?status=needs_review",
     },
   ]
 
@@ -189,26 +193,28 @@ export default function DashboardPage() {
       {/* Stats cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         {statCards.map((stat) => (
-          <Card key={stat.title}>
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-muted-foreground">
-                    {stat.title}
-                  </p>
-                  <p className="text-3xl font-bold">{stat.value}</p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {stat.description}
-                  </p>
+          <Link key={stat.title} href={stat.href}>
+            <Card className="cursor-pointer transition-shadow hover:shadow-md">
+              <CardContent className="p-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-muted-foreground">
+                      {stat.title}
+                    </p>
+                    <p className="text-3xl font-bold">{stat.value}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {stat.description}
+                    </p>
+                  </div>
+                  <div
+                    className={`flex h-12 w-12 items-center justify-center rounded-lg ${stat.bgColor}`}
+                  >
+                    <stat.icon className={`h-6 w-6 ${stat.color}`} />
+                  </div>
                 </div>
-                <div
-                  className={`flex h-12 w-12 items-center justify-center rounded-lg ${stat.bgColor}`}
-                >
-                  <stat.icon className={`h-6 w-6 ${stat.color}`} />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+          </Link>
         ))}
       </div>
 

@@ -152,6 +152,110 @@ export default function UploadPage() {
   const [editValue, setEditValue] = useState<string>("")
   const [editRoomId, setEditRoomId] = useState<string>("")
   const [showEditDialog, setShowEditDialog] = useState(false)
+  const [selectedResultIds, setSelectedResultIds] = useState<Set<number | string>>(new Set())
+  const [isBatchApproving, setIsBatchApproving] = useState(false)
+
+  const toggleSelectResult = (idKey: number | string) => {
+    setSelectedResultIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(idKey)) {
+        next.delete(idKey)
+      } else {
+        next.add(idKey)
+      }
+      return next
+    })
+  }
+
+  const unapprovedResults = batchStatus?.results.filter((r) => r.status !== "approved") || []
+  const isAllSelected = unapprovedResults.length > 0 && unapprovedResults.every((r) => selectedResultIds.has(r.id ?? r.staged_id ?? ""))
+
+  const handleSelectAllToggle = () => {
+    if (isAllSelected) {
+      setSelectedResultIds(new Set())
+    } else {
+      const allIds = unapprovedResults.map((r) => r.id ?? r.staged_id).filter(Boolean) as (number | string)[]
+      setSelectedResultIds(new Set(allIds))
+    }
+  }
+
+  const handleApproveSelected = async () => {
+    if (!batchStatus || selectedResultIds.size === 0) return
+    setIsBatchApproving(true)
+    try {
+      const toApprove = batchStatus.results.filter(
+        (r) => r.status !== "approved" && selectedResultIds.has(r.id ?? r.staged_id ?? "")
+      )
+      let count = 0
+      for (const item of toApprove) {
+        if (item.id) {
+          await apiPatch(`/readings/${item.id}`, { status: "approved" })
+          count++
+        } else if (item.staged_id && item.room_id && item.meter_value !== null) {
+          await apiPatch(`/readings/staged/${item.staged_id}`, {
+            room_id: item.room_id,
+            meter_value: item.meter_value,
+            status: "approved",
+          })
+          count++
+        }
+      }
+      toast({
+        title: "Xác nhận hàng loạt thành công",
+        description: `Đã xác nhận ${count} phòng được chọn!`,
+        variant: "success",
+      })
+      setSelectedResultIds(new Set())
+      if (batchStatus.job_id) {
+        const updatedStatus = await apiGet<BatchStatus>(`/readings/batch-status/${batchStatus.job_id}`)
+        setBatchStatus(updatedStatus)
+      }
+    } catch {
+      toast({ title: "Lỗi", description: "Không thể xác nhận một số phòng", variant: "destructive" })
+    } finally {
+      setIsBatchApproving(false)
+    }
+  }
+
+  const handleApproveAll = async () => {
+    if (!batchStatus) return
+    const unapproved = batchStatus.results.filter((r) => r.status !== "approved")
+    if (unapproved.length === 0) {
+      toast({ title: "Thông báo", description: "Tất cả các phòng đã được xác nhận!", variant: "default" })
+      return
+    }
+    setIsBatchApproving(true)
+    try {
+      let count = 0
+      for (const item of unapproved) {
+        if (item.id) {
+          await apiPatch(`/readings/${item.id}`, { status: "approved" })
+          count++
+        } else if (item.staged_id && item.room_id && item.meter_value !== null) {
+          await apiPatch(`/readings/staged/${item.staged_id}`, {
+            room_id: item.room_id,
+            meter_value: item.meter_value,
+            status: "approved",
+          })
+          count++
+        }
+      }
+      toast({
+        title: "Xác nhận tất cả thành công",
+        description: `Đã tự động xác nhận toàn bộ ${count} phòng!`,
+        variant: "success",
+      })
+      setSelectedResultIds(new Set())
+      if (batchStatus.job_id) {
+        const updatedStatus = await apiGet<BatchStatus>(`/readings/batch-status/${batchStatus.job_id}`)
+        setBatchStatus(updatedStatus)
+      }
+    } catch {
+      toast({ title: "Lỗi", description: "Không thể xác nhận một số phòng", variant: "destructive" })
+    } finally {
+      setIsBatchApproving(false)
+    }
+  }
 
   useEffect(() => {
     fetchBuildings()
@@ -610,30 +714,94 @@ export default function UploadPage() {
               </div>
             )}
 
+            {/* Batch Action Bar */}
+            {batchStatus.results && unapprovedResults.length > 0 && (
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3 p-3 bg-muted/40 rounded-xl border border-primary/20">
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-2 text-sm font-semibold cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={isAllSelected}
+                      onChange={handleSelectAllToggle}
+                      className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
+                    />
+                    Chọn tất cả ({unapprovedResults.length} phòng chờ xác nhận)
+                  </label>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {selectedResultIds.size > 0 && (
+                    <Button
+                      onClick={handleApproveSelected}
+                      disabled={isBatchApproving}
+                      size="sm"
+                      className="bg-blue-600 hover:bg-blue-700 text-white font-semibold gap-1 shadow-xs"
+                    >
+                      {isBatchApproving ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Check className="h-4 w-4" />
+                      )}
+                      Xác Nhận ({selectedResultIds.size}) Phòng Đã Chọn
+                    </Button>
+                  )}
+
+                  <Button
+                    onClick={handleApproveAll}
+                    disabled={isBatchApproving}
+                    size="sm"
+                    className="bg-green-600 hover:bg-green-700 text-white font-bold gap-1 shadow-sm"
+                  >
+                    {isBatchApproving ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="h-4 w-4" />
+                    )}
+                    ✅ Xác Nhận Tất Cả ({unapprovedResults.length} phòng)
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {/* Results grid */}
             {batchStatus.results && batchStatus.results.length > 0 ? (
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {batchStatus.results.map((result) => (
-                  <div
-                    key={result.id ?? result.staged_id}
-                    className="overflow-hidden rounded-lg border"
-                  >
-                    {/* Image */}
-                    <div className="relative aspect-video bg-muted">
-                      <ProtectedReadingImage
-                        imagePath={result.image_path}
-                        alt={result.room_number ? `Phòng ${result.room_number}` : "Ảnh chỉ số chưa gán phòng"}
-                      />
-                    </div>
-
-                    {/* Info */}
-                    <div className="p-3 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="font-medium">
-                          {result.room_number ? `Phòng ${result.room_number}` : "Chưa gán phòng"}
-                        </span>
-                        {getStatusBadge(result.status)}
+                {batchStatus.results.map((result) => {
+                  const idKey = result.id ?? result.staged_id ?? ""
+                  const isSelected = selectedResultIds.has(idKey)
+                  return (
+                    <div
+                      key={idKey}
+                      className={`overflow-hidden rounded-xl border transition-all ${
+                        isSelected ? "ring-2 ring-primary border-primary bg-primary/5" : "hover:border-primary/40"
+                      }`}
+                    >
+                      {/* Image */}
+                      <div className="relative aspect-video bg-muted">
+                        <ProtectedReadingImage
+                          imagePath={result.image_path}
+                          alt={result.room_number ? `Phòng ${result.room_number}` : "Ảnh chỉ số chưa gán phòng"}
+                        />
                       </div>
+
+                      {/* Info */}
+                      <div className="p-3 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            {result.status !== "approved" && (
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleSelectResult(idKey)}
+                                className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary cursor-pointer"
+                              />
+                            )}
+                            <span className="font-bold text-base text-primary">
+                              {result.room_number ? `Phòng ${result.room_number}` : "Chưa gán phòng"}
+                            </span>
+                          </div>
+                          {getStatusBadge(result.status)}
+                        </div>
 
                       {result.meter_value !== null && result.meter_value !== undefined && (
                         <div className="flex items-center gap-2">
@@ -696,7 +864,8 @@ export default function UploadPage() {
                       )}
                     </div>
                   </div>
-                ))}
+                )
+              })}
               </div>
             ) : batchStatus.status === "completed" ? (
               <div className="py-8 text-center bg-destructive/10 rounded-lg text-destructive">

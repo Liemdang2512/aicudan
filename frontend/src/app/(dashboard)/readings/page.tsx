@@ -1,6 +1,7 @@
 "use client"
 
 import React, { useCallback, useEffect, useState } from "react"
+import { useSearchParams } from "next/navigation"
 import {
   Gauge,
   Loader2,
@@ -56,11 +57,14 @@ function getCurrentMonth() {
 }
 
 export default function ReadingsPage() {
+  const searchParams = useSearchParams()
   const [buildings, setBuildings] = useState<Building[]>([])
   const [readings, setReadings] = useState<Reading[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [filterBuilding, setFilterBuilding] = useState<string>("all")
-  const [filterStatus, setFilterStatus] = useState<string>("all")
+  const [filterStatus, setFilterStatus] = useState<string>(
+    searchParams.get("status") ?? "all"
+  )
   const [filterMonth, setFilterMonth] = useState(getCurrentMonth)
   const [searchQuery, setSearchQuery] = useState("")
 
@@ -80,9 +84,6 @@ export default function ReadingsPage() {
       if (filterBuilding && filterBuilding !== "all") {
         params.building_id = filterBuilding
       }
-      if (filterStatus && filterStatus !== "all") {
-        params.status = filterStatus
-      }
       if (filterMonth) {
         params.month = filterMonth
       }
@@ -93,7 +94,7 @@ export default function ReadingsPage() {
     } finally {
       setIsLoading(false)
     }
-  }, [filterBuilding, filterMonth, filterStatus])
+  }, [filterBuilding, filterMonth])
 
   useEffect(() => {
     void fetchBuildings()
@@ -139,6 +140,11 @@ export default function ReadingsPage() {
   }
 
   const filteredReadings = readings.filter((r) => {
+    if (filterStatus === "approved" && r.status !== "approved") return false
+    if (filterStatus === "pending" && r.status !== "pending" && r.status !== "needs_review") return false
+    if (filterStatus === "needs_review" && r.status !== "needs_review") return false
+    if (filterStatus === "rejected" && r.status !== "rejected" && r.status !== "error") return false
+
     if (!searchQuery) return true
     const q = searchQuery.toLowerCase()
     return (
@@ -148,7 +154,7 @@ export default function ReadingsPage() {
   })
 
   const approvedCount = readings.filter((r) => r.status === "approved").length
-  const errorCount = readings.filter((r) => r.status === "rejected").length
+  const errorCount = readings.filter((r) => r.status === "rejected" || r.status === "error").length
   const pendingCount = readings.filter(
     (r) => r.status === "pending" || r.status === "needs_review"
   ).length
@@ -163,53 +169,84 @@ export default function ReadingsPage() {
         </p>
       </div>
 
-      {/* Summary */}
+      {/* Summary Cards (Interactive Tabs) */}
       <div className="grid gap-4 sm:grid-cols-4">
-        <Card>
+        <Card
+          onClick={() => setFilterStatus("all")}
+          className={`cursor-pointer transition-all duration-200 hover:shadow-md select-none ${
+            filterStatus === "all"
+              ? "ring-2 ring-primary bg-primary/5 border-primary shadow-sm"
+              : "hover:border-primary/40"
+          }`}
+        >
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-muted-foreground">Tổng số ghi</p>
+                <p className="text-sm font-medium text-muted-foreground">Tổng số ghi</p>
                 <p className="text-2xl font-bold">{readings.length}</p>
               </div>
-              <Gauge className="h-8 w-8 text-muted-foreground/50" />
+              <Gauge className={`h-8 w-8 transition-colors ${filterStatus === "all" ? "text-primary" : "text-muted-foreground/50"}`} />
             </div>
           </CardContent>
         </Card>
-        <Card>
+
+        <Card
+          onClick={() => setFilterStatus("approved")}
+          className={`cursor-pointer transition-all duration-200 hover:shadow-md select-none ${
+            filterStatus === "approved"
+              ? "ring-2 ring-green-500 bg-green-500/10 border-green-500 shadow-sm"
+              : "hover:border-green-500/40"
+          }`}
+        >
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-muted-foreground">Đã xác nhận</p>
-                <p className="text-2xl font-bold text-green-600">
+                <p className="text-sm font-medium text-muted-foreground">Đã xác nhận</p>
+                <p className="text-2xl font-bold text-green-600 dark:text-green-400">
                   {approvedCount}
                 </p>
               </div>
-              <CheckCircle2 className="h-8 w-8 text-green-500/50" />
+              <CheckCircle2 className={`h-8 w-8 transition-colors ${filterStatus === "approved" ? "text-green-500" : "text-green-500/50"}`} />
             </div>
           </CardContent>
         </Card>
-        <Card>
+
+        <Card
+          onClick={() => setFilterStatus("pending")}
+          className={`cursor-pointer transition-all duration-200 hover:shadow-md select-none ${
+            filterStatus === "pending" || filterStatus === "needs_review"
+              ? "ring-2 ring-yellow-500 bg-yellow-500/10 border-yellow-500 shadow-sm"
+              : "hover:border-yellow-500/40"
+          }`}
+        >
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-muted-foreground">Đang xử lý</p>
-                <p className="text-2xl font-bold text-yellow-600">
+                <p className="text-sm font-medium text-muted-foreground">Đang xử lý</p>
+                <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">
                   {pendingCount}
                 </p>
               </div>
-              <Clock className="h-8 w-8 text-yellow-500/50" />
+              <Clock className={`h-8 w-8 transition-colors ${filterStatus === "pending" || filterStatus === "needs_review" ? "text-yellow-500" : "text-yellow-500/50"}`} />
             </div>
           </CardContent>
         </Card>
-        <Card>
+
+        <Card
+          onClick={() => setFilterStatus("rejected")}
+          className={`cursor-pointer transition-all duration-200 hover:shadow-md select-none ${
+            filterStatus === "rejected"
+              ? "ring-2 ring-red-500 bg-red-500/10 border-red-500 shadow-sm"
+              : "hover:border-red-500/40"
+          }`}
+        >
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-muted-foreground">Lỗi</p>
-                <p className="text-2xl font-bold text-red-600">{errorCount}</p>
+                <p className="text-sm font-medium text-muted-foreground">Lỗi</p>
+                <p className="text-2xl font-bold text-red-600 dark:text-red-400">{errorCount}</p>
               </div>
-              <AlertCircle className="h-8 w-8 text-red-500/50" />
+              <AlertCircle className={`h-8 w-8 transition-colors ${filterStatus === "rejected" ? "text-red-500" : "text-red-500/50"}`} />
             </div>
           </CardContent>
         </Card>

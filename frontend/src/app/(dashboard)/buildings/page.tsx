@@ -16,6 +16,7 @@ import {
   Upload,
   FileSpreadsheet,
   AlertCircle,
+  Download,
 } from "lucide-react"
 import * as XLSX from "xlsx"
 import {
@@ -290,6 +291,21 @@ export default function BuildingsPage() {
         variant: "destructive",
       })
     }
+  }
+
+  // Download Excel template
+  const downloadTemplate = () => {
+    const headers = ["STT", "ID Phòng", "Tên Phòng", "Tên Đại Diện", "Chỉ Số Cũ", "Chỉ Số Mới", "", "", "", "", "Số Điện Thoại", "Email"]
+    const rows = [
+      [1, "B 101", "B 101", "Nguyễn Văn A", 1000, 1100, "", "", "", "", "0901234567", "example@email.com"],
+      [2, "B 102", "B 102", "Trần Thị B", 500, 650, "", "", "", "", "0912345678", ""],
+      [3, "B 103", "", "", 200, "", "", "", "", "", "", ""],
+    ]
+    const wb = XLSX.utils.book_new()
+    const ws = XLSX.utils.aoa_to_sheet([headers, ...rows])
+    ws["!cols"] = [8, 12, 12, 20, 12, 12, 8, 8, 8, 8, 14, 24].map(w => ({ wch: w }))
+    XLSX.utils.book_append_sheet(wb, ws, "Danh sách phòng")
+    XLSX.writeFile(wb, "mau-danh-sach-phong.xlsx")
   }
 
   // Import Excel
@@ -880,7 +896,7 @@ export default function BuildingsPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label>Telegram ID</Label>
+              <Label>Telegram Chat ID</Label>
               <Input
                 value={roomForm.telegram_id}
                 onChange={(e) =>
@@ -891,9 +907,15 @@ export default function BuildingsPage() {
                 }
                 placeholder="Ví dụ: 123456789"
               />
-              <p className="text-xs text-muted-foreground">
-                ID Telegram để gửi thông báo hóa đơn tự động
-              </p>
+              <div className="text-xs text-muted-foreground space-y-1">
+                <p>Chat ID dạng số để gửi thông báo hóa đơn tự động.</p>
+                <p className="font-medium text-orange-600">Cách lấy Chat ID:</p>
+                <ol className="list-decimal pl-4 space-y-0.5">
+                  <li>Cư dân nhắn tin <span className="font-mono bg-muted px-1 rounded">/start</span> cho bot của bạn trước</li>
+                  <li>Sau đó nhắn tin cho <span className="font-mono bg-muted px-1 rounded">@userinfobot</span> — nó sẽ trả về Chat ID</li>
+                  <li>Nhập số ID đó vào đây (chỉ nhập số, không có @)</li>
+                </ol>
+              </div>
             </div>
             <div className="space-y-2">
               <Label>Chỉ số ban đầu (kWh)</Label>
@@ -928,11 +950,19 @@ export default function BuildingsPage() {
       <Dialog open={showImportDialog} onOpenChange={setShowImportDialog}>
         <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col">
           <DialogHeader>
-            <DialogTitle>Nhập danh sách phòng từ Excel</DialogTitle>
-            <DialogDescription>
-              Tải file Excel để tải lên danh sách phòng cho{" "}
-              <strong>{selectedBuilding?.name}</strong>. Dưới đây là bảng xem trước dữ liệu (tối đa 50 dòng).
-            </DialogDescription>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <DialogTitle>Nhập danh sách phòng từ Excel</DialogTitle>
+                <DialogDescription className="mt-1">
+                  Tải file Excel để tải lên danh sách phòng cho{" "}
+                  <strong>{selectedBuilding?.name}</strong>. Dưới đây là bảng xem trước dữ liệu (tối đa 50 dòng).
+                </DialogDescription>
+              </div>
+              <Button variant="outline" size="sm" onClick={downloadTemplate} className="shrink-0 text-xs gap-1.5">
+                <Download className="h-3.5 w-3.5" />
+                Tải file mẫu
+              </Button>
+            </div>
           </DialogHeader>
 
           <div className="flex-1 overflow-auto space-y-4 py-4 pr-1">

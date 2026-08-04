@@ -9,6 +9,7 @@ from app.core.security import hash_password, verify_password
 from app.db.base import Base
 from app.db.session import engine
 from app.models.batch_job import BatchJob  # noqa: F401
+from app.models.bot_session import BotSession  # noqa: F401
 from app.models.building import Building  # noqa: F401
 from app.models.invoice import Invoice  # noqa: F401
 from app.models.price_config import PriceConfig

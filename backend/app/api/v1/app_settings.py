@@ -176,6 +176,53 @@ async def update_settings(
     )
 
 
+class SetupWebhookRequest(BaseModel):
+    server_url: str  # e.g. https://yourdomain.com
+
+
+class SetupWebhookResponse(BaseModel):
+    ok: bool
+    webhook_url: str
+    description: str
+
+
+@router.post("/setup-webhook", response_model=SetupWebhookResponse)
+async def setup_telegram_webhook(
+    data: SetupWebhookRequest,
+    current_user: User = Depends(require_admin),
+):
+    token = settings.TELEGRAM_BOT_TOKEN
+    if not token:
+        raise HTTPException(status_code=400, detail="Chưa cấu hình Telegram Bot Token")
+
+    server_url = data.server_url.rstrip("/")
+    webhook_url = f"{server_url}/api/v1/telegram/webhook"
+
+    params: dict = {"url": webhook_url, "allowed_updates": ["message"]}
+    if settings.TELEGRAM_WEBHOOK_SECRET:
+        params["secret_token"] = settings.TELEGRAM_WEBHOOK_SECRET
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"https://api.telegram.org/bot{token}/setWebhook",
+                json=params,
+            )
+            r.raise_for_status()
+            result = r.json()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Không thể kết nối Telegram API: {exc}") from exc
+
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("description", "Đăng ký webhook thất bại"))
+
+    return SetupWebhookResponse(
+        ok=True,
+        webhook_url=webhook_url,
+        description=result.get("description", "Webhook đã được đăng ký"),
+    )
+
+
 @router.post("/validate", response_model=ValidateSettingsResponse)
 async def validate_settings(
     data: ValidateSettingsRequest,

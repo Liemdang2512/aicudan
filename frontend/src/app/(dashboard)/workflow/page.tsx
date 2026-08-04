@@ -428,6 +428,100 @@ export default function WorkflowPage() {
     }
   }
 
+  const [selectedResultIds, setSelectedResultIds] = useState<Set<number | string>>(new Set())
+  const [isBatchApproving, setIsBatchApproving] = useState(false)
+
+  const toggleSelectResult = (idKey: number | string) => {
+    setSelectedResultIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(idKey)) {
+        next.delete(idKey)
+      } else {
+        next.add(idKey)
+      }
+      return next
+    })
+  }
+
+  const unapprovedResults = reviewResults.filter((r) => r.status !== "approved")
+  const isAllSelected = unapprovedResults.length > 0 && unapprovedResults.every((r) => selectedResultIds.has(r.id ?? r.staged_id ?? ""))
+
+  const handleSelectAllToggle = () => {
+    if (isAllSelected) {
+      setSelectedResultIds(new Set())
+    } else {
+      const allIds = unapprovedResults.map((r) => r.id ?? r.staged_id).filter(Boolean) as (number | string)[]
+      setSelectedResultIds(new Set(allIds))
+    }
+  }
+
+  const handleApproveAll = async () => {
+    if (!batchStatus) return
+    const toApprove = batchStatus.results.filter((r) => r.status !== "approved")
+    if (toApprove.length === 0) return
+    setIsBatchApproving(true)
+    try {
+      let count = 0
+      for (const r of toApprove) {
+        if (r.id) {
+          await apiPatch(`/readings/${r.id}`, { status: "approved" })
+          count++
+        } else if (r.staged_id && r.room_id && r.meter_value !== null) {
+          await apiPatch(`/readings/staged/${r.staged_id}`, {
+            room_id: r.room_id,
+            meter_value: r.meter_value,
+            status: "approved",
+          })
+          count++
+        }
+      }
+      toast({ title: "Xác nhận thành công", description: `Đã tự động xác nhận ${count} phòng!`, variant: "success" })
+      setSelectedResultIds(new Set())
+      if (batchStatus.job_id) {
+        const updatedStatus = await apiGet<BatchStatus>(`/readings/batch-status/${batchStatus.job_id}`)
+        setBatchStatus(updatedStatus)
+      }
+    } catch {
+      toast({ title: "Lỗi", description: "Không thể xác nhận một số phòng", variant: "destructive" })
+    } finally {
+      setIsBatchApproving(false)
+    }
+  }
+
+  const handleApproveSelected = async () => {
+    if (!batchStatus || selectedResultIds.size === 0) return
+    setIsBatchApproving(true)
+    try {
+      const toApprove = batchStatus.results.filter(
+        (r) => r.status !== "approved" && selectedResultIds.has(r.id ?? r.staged_id ?? "")
+      )
+      let count = 0
+      for (const r of toApprove) {
+        if (r.id) {
+          await apiPatch(`/readings/${r.id}`, { status: "approved" })
+          count++
+        } else if (r.staged_id && r.room_id && r.meter_value !== null) {
+          await apiPatch(`/readings/staged/${r.staged_id}`, {
+            room_id: r.room_id,
+            meter_value: r.meter_value,
+            status: "approved",
+          })
+          count++
+        }
+      }
+      toast({ title: "Xác nhận thành công", description: `Đã xác nhận ${count} phòng được chọn!`, variant: "success" })
+      setSelectedResultIds(new Set())
+      if (batchStatus.job_id) {
+        const updatedStatus = await apiGet<BatchStatus>(`/readings/batch-status/${batchStatus.job_id}`)
+        setBatchStatus(updatedStatus)
+      }
+    } catch {
+      toast({ title: "Lỗi", description: "Không thể xác nhận một số phòng", variant: "destructive" })
+    } finally {
+      setIsBatchApproving(false)
+    }
+  }
+
   // Step 3 Generate Invoices
   const handleGenerateInvoices = async () => {
     if (!selectedBuilding || !selectedPriceConfig) {
@@ -819,23 +913,90 @@ export default function WorkflowPage() {
                 Còn {pendingReviewCount} chỉ số cần gán phòng hoặc xác nhận trước khi tạo hóa đơn.
               </div>
             )}
+            {/* Batch Action Bar */}
+            {unapprovedResults.length > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-muted/40 rounded-xl border border-primary/20">
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-2 text-sm font-semibold cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={isAllSelected}
+                      onChange={handleSelectAllToggle}
+                      className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
+                    />
+                    Chọn tất cả ({unapprovedResults.length} phòng chờ duyệt)
+                  </label>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {selectedResultIds.size > 0 && (
+                    <Button
+                      onClick={handleApproveSelected}
+                      disabled={isBatchApproving}
+                      size="sm"
+                      className="bg-blue-600 hover:bg-blue-700 text-white font-semibold gap-1"
+                    >
+                      {isBatchApproving ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Check className="h-4 w-4" />
+                      )}
+                      Xác Nhận ({selectedResultIds.size}) Phòng Đã Chọn
+                    </Button>
+                  )}
+
+                  <Button
+                    onClick={handleApproveAll}
+                    disabled={isBatchApproving}
+                    size="sm"
+                    className="bg-green-600 hover:bg-green-700 text-white font-bold gap-1 shadow-sm"
+                  >
+                    {isBatchApproving ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="h-4 w-4" />
+                    )}
+                    ✅ Xác Nhận Tất Cả ({unapprovedResults.length} phòng)
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {batchStatus && batchStatus.results && batchStatus.results.length > 0 ? (
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {batchStatus.results.map((result) => (
-                  <div key={result.id ?? result.staged_id} className="overflow-hidden rounded-xl border bg-card shadow-xs">
-                    <div className="relative aspect-video bg-muted">
-                      <ProtectedReadingImage
-                        imagePath={result.image_path}
-                        alt={result.room_number ? `Phòng ${result.room_number}` : "Ảnh chưa gán phòng"}
-                      />
-                    </div>
-                    <div className="p-3 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-base text-primary">{result.room_number ? `Phòng ${result.room_number}` : "Chưa gán phòng"}</span>
-                        <Badge variant={result.status === "approved" ? "success" : "warning"}>
-                          {result.status === "approved" ? "Đã xác nhận" : "Cần xem lại"}
-                        </Badge>
+                {batchStatus.results.map((result) => {
+                  const idKey = result.id ?? result.staged_id ?? ""
+                  const isSelected = selectedResultIds.has(idKey)
+                  return (
+                    <div
+                      key={idKey}
+                      className={`overflow-hidden rounded-xl border bg-card shadow-xs transition-all ${
+                        isSelected ? "ring-2 ring-primary border-primary bg-primary/5" : ""
+                      }`}
+                    >
+                      <div className="relative aspect-video bg-muted">
+                        <ProtectedReadingImage
+                          imagePath={result.image_path}
+                          alt={result.room_number ? `Phòng ${result.room_number}` : "Ảnh chưa gán phòng"}
+                        />
                       </div>
+                      <div className="p-3 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            {result.status !== "approved" && (
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleSelectResult(idKey)}
+                                className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary cursor-pointer"
+                              />
+                            )}
+                            <span className="font-bold text-base text-primary">{result.room_number ? `Phòng ${result.room_number}` : "Chưa gán phòng"}</span>
+                          </div>
+                          <Badge variant={result.status === "approved" ? "success" : "warning"}>
+                            {result.status === "approved" ? "Đã xác nhận" : "Cần xem lại"}
+                          </Badge>
+                        </div>
 
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-muted-foreground">Chỉ số:</span>
@@ -866,7 +1027,8 @@ export default function WorkflowPage() {
                       </div>
                     </div>
                   </div>
-                ))}
+                )
+              })}
               </div>
             ) : (
               <div className="py-12 text-center text-muted-foreground border border-dashed rounded-xl">

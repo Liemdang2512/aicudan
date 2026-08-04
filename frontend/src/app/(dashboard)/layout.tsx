@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useEffect, useState } from "react"
-import { useRouter } from "next/navigation"
+import { useRouter, usePathname } from "next/navigation"
 import { Sidebar } from "@/components/layout/sidebar"
 import { Header } from "@/components/layout/header"
 import { useAuthStore } from "@/stores/auth-store"
@@ -12,8 +12,24 @@ export default function DashboardLayout({
   children: React.ReactNode
 }) {
   const router = useRouter()
+  const pathname = usePathname()
   const { isAuthenticated, isLoading, loadFromStorage } = useAuthStore()
   const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  // Fix Radix UI/react-remove-scroll leaks on navigation.
+  // DismissableLayer sets body.style.pointerEvents="none" (via useEffect).
+  // react-remove-scroll-bar sets data-scroll-locked attr → body overflow:hidden.
+  // Both leak when user navigates while a Dialog/Select is open.
+  // setTimeout(0) defers cleanup to a macrotask AFTER all React effect cleanups run,
+  // avoiding races with DismissableLayer's own cleanup.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      document.body.style.pointerEvents = ""
+      document.body.style.overflow = ""
+      document.body.removeAttribute("data-scroll-locked")
+    }, 0)
+    return () => clearTimeout(id)
+  }, [pathname])
 
   useEffect(() => {
     void loadFromStorage()

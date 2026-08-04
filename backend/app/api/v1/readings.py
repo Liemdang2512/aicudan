@@ -79,11 +79,25 @@ def _canonical_room_identifier(value: object) -> str:
     return re.sub(r"\s+", " ", str(value)).strip().casefold()
 
 
+def _strip_room_prefix(value: str) -> str:
+    """Strip leading non-digit prefix from a room identifier.
+
+    Handles AI-detected labels like 'B 1822', 'P.101', 'A3457' where the
+    DB may store only the numeric portion ('1822', '101', '3457').
+    """
+    stripped = re.sub(r"^[A-Za-z.\-\s]+", "", value).strip()
+    return stripped if stripped != value.strip() else ""
+
+
 def _room_aliases(room_number: str) -> set[str]:
     aliases = {_canonical_room_identifier(room_number)}
     parsed = extract_room_number(f"{room_number}.jpg")
     if parsed:
         aliases.add(_canonical_room_identifier(parsed))
+    # If room stored with prefix (e.g. "B 1822"), also expose the numeric part
+    numeric = _strip_room_prefix(room_number)
+    if numeric:
+        aliases.add(_canonical_room_identifier(numeric))
     return aliases
 
 
@@ -94,9 +108,16 @@ def _match_unique_room(
 ) -> Room | None:
     identifiers: set[str] = set()
     if filename_room:
-        identifiers.add(_canonical_room_identifier(filename_room))
+        identifiers.add(_canonical_room_identifier(str(filename_room)))
+        numeric = _strip_room_prefix(str(filename_room))
+        if numeric:
+            identifiers.add(_canonical_room_identifier(numeric))
     if ai_room:
         identifiers.add(_canonical_room_identifier(ai_room))
+        # Also add numeric-only part so "B 1822" matches room stored as "1822"
+        numeric = _strip_room_prefix(str(ai_room))
+        if numeric:
+            identifiers.add(_canonical_room_identifier(numeric))
         parsed_ai_room = extract_room_number(f"{ai_room}.jpg")
         if parsed_ai_room:
             identifiers.add(_canonical_room_identifier(parsed_ai_room))

@@ -9,7 +9,6 @@ import {
   Loader2,
   DollarSign,
   MessageCircle,
-  Bot,
   CheckCircle2,
   XCircle,
 } from "lucide-react"
@@ -75,12 +74,9 @@ export default function SettingsPage() {
   const [formVat, setFormVat] = useState("8")
 
   // API config state
-  const [geminiApiKey, setGeminiApiKey] = useState("")
   const [telegramToken, setTelegramToken] = useState("")
   const [configSaving, setConfigSaving] = useState(false)
-  const [geminiKeySet, setGeminiKeySet] = useState(false)
   const [telegramKeySet, setTelegramKeySet] = useState(false)
-  const [geminiMasked, setGeminiMasked] = useState("")
   const [telegramMasked, setTelegramMasked] = useState("")
 
   useEffect(() => {
@@ -91,27 +87,20 @@ export default function SettingsPage() {
   const fetchAppSettings = async () => {
     try {
       const data = await apiGet<{
-        gemini_api_key_set: boolean
         telegram_bot_token_set: boolean
-        gemini_api_key_masked: string
         telegram_bot_token_masked: string
       }>("/settings")
-      setGeminiKeySet(data.gemini_api_key_set)
       setTelegramKeySet(data.telegram_bot_token_set)
-      setGeminiMasked(data.gemini_api_key_masked)
       setTelegramMasked(data.telegram_bot_token_masked)
     } catch {
       // Settings API might not be available yet
     }
   }
 
-  const handleSaveConfig = async (field: "gemini" | "telegram") => {
+  const handleSaveConfig = async (field: "telegram") => {
     setConfigSaving(true)
     try {
       const payload: Record<string, string> = {}
-      if (field === "gemini" && geminiApiKey) {
-        payload.gemini_api_key = geminiApiKey
-      }
       if (field === "telegram" && telegramToken) {
         payload.telegram_bot_token = telegramToken
       }
@@ -119,10 +108,9 @@ export default function SettingsPage() {
       await apiPatch("/settings", payload)
       toast({
         title: "Lưu thành công",
-        description: field === "gemini" ? "Gemini API Key đã được cập nhật" : "Telegram Bot Token đã được cập nhật",
+        description: "Telegram Bot Token đã được cập nhật",
         variant: "success",
       })
-      setGeminiApiKey("")
       setTelegramToken("")
       fetchAppSettings()
     } catch (error) {
@@ -443,57 +431,7 @@ export default function SettingsPage() {
       </Card>
 
       {/* API Configurations */}
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* Gemini API Key */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Bot className="h-5 w-5" />
-              Google Gemini AI
-              {geminiKeySet ? (
-                <CheckCircle2 className="h-4 w-4 text-green-500" />
-              ) : (
-                <XCircle className="h-4 w-4 text-red-500" />
-              )}
-            </CardTitle>
-            <CardDescription>
-              API Key cho nhận dạng chỉ số đồng hồ bằng AI
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {geminiKeySet && (
-              <div className="rounded-md bg-green-50 p-3 dark:bg-green-950">
-                <p className="text-sm text-green-800 dark:text-green-200">
-                  Key hiện tại: <code className="font-mono">{geminiMasked}</code>
-                </p>
-              </div>
-            )}
-            <div className="space-y-2">
-              <Label>{geminiKeySet ? "Thay đổi API Key" : "Nhập API Key"}</Label>
-              <Input
-                type="password"
-                value={geminiApiKey}
-                onChange={(e) => setGeminiApiKey(e.target.value)}
-                placeholder="AIzaSy..."
-              />
-              <p className="text-xs text-muted-foreground">
-                Lấy API Key tại Google AI Studio (aistudio.google.com)
-              </p>
-            </div>
-            <Button
-              disabled={configSaving || !geminiApiKey}
-              onClick={() => handleSaveConfig("gemini")}
-            >
-              {configSaving ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Settings className="mr-2 h-4 w-4" />
-              )}
-              Lưu API Key
-            </Button>
-          </CardContent>
-        </Card>
-
+      <div className="grid gap-6">
         {/* Telegram Bot Token */}
         <Card>
           <CardHeader>

@@ -10,6 +10,7 @@ from app.api.v1 import (
     price_configs,
     readings,
     rooms,
+    telegram_bot,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -23,3 +24,4 @@ api_router.include_router(invoices.router)
 api_router.include_router(notifications.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(app_settings.router)
+api_router.include_router(telegram_bot.router)
