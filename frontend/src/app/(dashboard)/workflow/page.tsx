@@ -1221,6 +1221,43 @@ export default function WorkflowPage() {
               </div>
             )}
 
+            {/* Sending progress banner */}
+            {notificationStatus && notificationStatus.status !== "completed" && notificationStatus.status !== "failed" && (
+              <div className="flex items-center gap-3 p-4 rounded-xl border border-blue-200 bg-blue-50 dark:bg-blue-950/30 dark:border-blue-800">
+                <Loader2 className="h-6 w-6 text-blue-600 animate-spin shrink-0" />
+                <div>
+                  <p className="font-semibold text-blue-700 dark:text-blue-400">Đang gửi Telegram...</p>
+                  <p className="text-sm text-blue-600 dark:text-blue-500">
+                    Đã xử lý {notificationStatus.processed}/{notificationStatus.total} hóa đơn
+                    {notificationStatus.sent > 0 && ` — đã gửi được ${notificationStatus.sent}`}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Result banner */}
+            {notificationStatus && (notificationStatus.status === "completed" || notificationStatus.status === "failed") && (
+              <div className={`flex items-start gap-3 p-4 rounded-xl border ${
+                notificationStatus.failed === 0
+                  ? "border-green-200 bg-green-50 dark:bg-green-950/30 dark:border-green-800"
+                  : "border-yellow-200 bg-yellow-50 dark:bg-yellow-950/30 dark:border-yellow-800"
+              }`}>
+                <div className="text-2xl shrink-0">
+                  {notificationStatus.failed === 0 ? "✅" : "⚠️"}
+                </div>
+                <div className="flex-1">
+                  <p className={`font-bold text-base ${notificationStatus.failed === 0 ? "text-green-700 dark:text-green-400" : "text-yellow-700 dark:text-yellow-400"}`}>
+                    {notificationStatus.failed === 0
+                      ? `Đã gửi thành công ${notificationStatus.sent} tin nhắn Telegram!`
+                      : `Gửi hoàn tất: ${notificationStatus.sent} thành công, ${notificationStatus.failed} thất bại`}
+                  </p>
+                  <p className="text-sm text-muted-foreground mt-0.5">
+                    Tổng cộng {notificationStatus.total} hóa đơn đã được xử lý. Xem trạng thái từng phòng bên dưới.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Room delivery list */}
             <div className="space-y-3">
               <h4 className="font-bold text-sm">Trạng thái gửi theo phòng:</h4>
