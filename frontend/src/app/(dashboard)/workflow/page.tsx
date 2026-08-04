@@ -1106,8 +1106,8 @@ export default function WorkflowPage() {
               <Button variant="outline" onClick={() => setCurrentStep(2)}>
                 <ArrowLeft className="mr-1 h-4 w-4" /> Quay lại Bước 2
               </Button>
-              <Button onClick={handleSendTelegramBatch} disabled={isSendingTelegram} className="bg-primary hover:bg-primary/90 text-primary-foreground font-bold">
-                {isSendingTelegram ? <Loader2 className="h-4 w-4 animate-spin" /> : "🚀 Gửi Telegram Từng Phòng (Bước 4) ➔"}
+              <Button onClick={() => setCurrentStep(4)} className="bg-primary hover:bg-primary/90 text-primary-foreground font-bold">
+                🚀 Gửi Telegram Từng Phòng (Bước 4) ➔
               </Button>
             </div>
           </CardHeader>
@@ -1175,7 +1175,10 @@ export default function WorkflowPage() {
                   : "Hệ thống tự động gửi tin nhắn báo tiền điện kèm ảnh công tơ điện trực tiếp tới tài khoản Telegram cư dân."}
               </CardDescription>
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
+              <Button variant="outline" onClick={() => setCurrentStep(3)} disabled={isSendingTelegram}>
+                <ArrowLeft className="mr-1 h-4 w-4" /> Quay lại Bước 3
+              </Button>
               <Button variant="outline" onClick={handleExportExcel}>
                 <Download className="mr-1 h-4 w-4" /> Xuất Excel Báo Cáo
               </Button>
@@ -1199,6 +1202,24 @@ export default function WorkflowPage() {
                 <p className="text-muted-foreground italic mt-2">📸 Ảnh chụp mặt đồng hồ điện công tơ được đính kèm bên dưới tin nhắn.</p>
               </div>
             </div>
+
+            {/* Confirm Send Button */}
+            {!notificationStatus && (
+              <div className="flex justify-center">
+                <Button
+                  onClick={handleSendTelegramBatch}
+                  disabled={isSendingTelegram}
+                  size="lg"
+                  className="bg-blue-600 hover:bg-blue-700 text-white font-bold px-8"
+                >
+                  {isSendingTelegram ? (
+                    <><Loader2 className="mr-2 h-5 w-5 animate-spin" /> Đang gửi...</>
+                  ) : (
+                    <><Send className="mr-2 h-5 w-5" /> Xác Nhận Gửi Telegram Cho Tất Cả Phòng</>
+                  )}
+                </Button>
+              </div>
+            )}
 
             {/* Room delivery list */}
             <div className="space-y-3">
