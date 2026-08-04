@@ -293,8 +293,12 @@ export default function WorkflowPage() {
   })
 
   const reviewResults = batchStatus?.results ?? []
+  // Chỉ đếm những reading CÓ THỂ approve (có room_id). Hình chưa gán phòng không tính vào pending.
   const pendingReviewCount = reviewResults.filter(
-    (result) => result.status !== "approved"
+    (result) =>
+      result.status !== "approved" &&
+      (result.id != null ||
+        (result.staged_id != null && result.room_id != null && result.meter_value !== null))
   ).length
   const canGenerateInvoices =
     reviewResults.length > 0 && pendingReviewCount === 0
@@ -430,6 +434,12 @@ export default function WorkflowPage() {
 
   const [selectedResultIds, setSelectedResultIds] = useState<Set<number | string>>(new Set())
   const [isBatchApproving, setIsBatchApproving] = useState(false)
+  const [approveConfirmDialog, setApproveConfirmDialog] = useState<{
+    open: boolean
+    unmatchedCount: number
+    toApprove: ReadingResult[]
+    successMsg: string
+  } | null>(null)
 
   const toggleSelectResult = (idKey: number | string) => {
     setSelectedResultIds((prev) => {
@@ -455,14 +465,14 @@ export default function WorkflowPage() {
     }
   }
 
-  const handleApproveAll = async () => {
-    if (!batchStatus) return
-    const toApprove = batchStatus.results.filter((r) => r.status !== "approved")
-    if (toApprove.length === 0) return
+  const canApproveResult = (r: ReadingResult) =>
+    r.id != null || (r.staged_id != null && r.room_id != null && r.meter_value !== null)
+
+  const executeApproveList = async (list: ReadingResult[], successMsg: string) => {
     setIsBatchApproving(true)
     try {
       let count = 0
-      for (const r of toApprove) {
+      for (const r of list) {
         if (r.id) {
           await apiPatch(`/readings/${r.id}`, { status: "approved" })
           count++
@@ -475,11 +485,20 @@ export default function WorkflowPage() {
           count++
         }
       }
-      toast({ title: "Xác nhận thành công", description: `Đã tự động xác nhận ${count} phòng!`, variant: "success" })
+      toast({ title: "Xác nhận thành công", description: successMsg.replace("{count}", String(count)), variant: "success" })
       setSelectedResultIds(new Set())
-      if (batchStatus.job_id) {
+      if (batchStatus?.job_id) {
         const updatedStatus = await apiGet<BatchStatus>(`/readings/batch-status/${batchStatus.job_id}`)
         setBatchStatus(updatedStatus)
+        // Nếu không còn reading nào cần approve → tự động sang bước 3
+        const remainingPending = updatedStatus.results.filter(
+          (r) =>
+            r.status !== "approved" &&
+            (r.id != null || (r.staged_id != null && r.room_id != null && r.meter_value !== null))
+        ).length
+        if (remainingPending === 0 && updatedStatus.results.length > 0) {
+          handleGenerateInvoices(true)
+        }
       }
     } catch {
       toast({ title: "Lỗi", description: "Không thể xác nhận một số phòng", variant: "destructive" })
@@ -488,47 +507,38 @@ export default function WorkflowPage() {
     }
   }
 
-  const handleApproveSelected = async () => {
+  const handleApproveAll = () => {
+    if (!batchStatus) return
+    const toApprove = batchStatus.results.filter((r) => r.status !== "approved")
+    if (toApprove.length === 0) return
+    const unmatched = toApprove.filter((r) => !canApproveResult(r))
+    if (unmatched.length > 0) {
+      setApproveConfirmDialog({ open: true, unmatchedCount: unmatched.length, toApprove, successMsg: "Đã xác nhận {count} phòng (bỏ qua {skip} hình chưa gán phòng)." })
+    } else {
+      executeApproveList(toApprove, "Đã tự động xác nhận {count} phòng!")
+    }
+  }
+
+  const handleApproveSelected = () => {
     if (!batchStatus || selectedResultIds.size === 0) return
-    setIsBatchApproving(true)
-    try {
-      const toApprove = batchStatus.results.filter(
-        (r) => r.status !== "approved" && selectedResultIds.has(r.id ?? r.staged_id ?? "")
-      )
-      let count = 0
-      for (const r of toApprove) {
-        if (r.id) {
-          await apiPatch(`/readings/${r.id}`, { status: "approved" })
-          count++
-        } else if (r.staged_id && r.room_id && r.meter_value !== null) {
-          await apiPatch(`/readings/staged/${r.staged_id}`, {
-            room_id: r.room_id,
-            meter_value: r.meter_value,
-            status: "approved",
-          })
-          count++
-        }
-      }
-      toast({ title: "Xác nhận thành công", description: `Đã xác nhận ${count} phòng được chọn!`, variant: "success" })
-      setSelectedResultIds(new Set())
-      if (batchStatus.job_id) {
-        const updatedStatus = await apiGet<BatchStatus>(`/readings/batch-status/${batchStatus.job_id}`)
-        setBatchStatus(updatedStatus)
-      }
-    } catch {
-      toast({ title: "Lỗi", description: "Không thể xác nhận một số phòng", variant: "destructive" })
-    } finally {
-      setIsBatchApproving(false)
+    const toApprove = batchStatus.results.filter(
+      (r) => r.status !== "approved" && selectedResultIds.has(r.id ?? r.staged_id ?? "")
+    )
+    const unmatched = toApprove.filter((r) => !canApproveResult(r))
+    if (unmatched.length > 0) {
+      setApproveConfirmDialog({ open: true, unmatchedCount: unmatched.length, toApprove, successMsg: "Đã xác nhận {count} phòng được chọn (bỏ qua {skip} hình chưa gán phòng)." })
+    } else {
+      executeApproveList(toApprove, "Đã xác nhận {count} phòng được chọn!")
     }
   }
 
   // Step 3 Generate Invoices
-  const handleGenerateInvoices = async () => {
+  const handleGenerateInvoices = async (force = false) => {
     if (!selectedBuilding || !selectedPriceConfig) {
       toast({ title: "Thiếu thông tin", description: "Vui lòng chọn Tòa nhà và Bảng giá", variant: "destructive" })
       return
     }
-    if (!canGenerateInvoices) {
+    if (!force && !canGenerateInvoices) {
       toast({
         title: "Chưa thể tạo hóa đơn",
         description:
@@ -747,6 +757,43 @@ export default function WorkflowPage() {
   }
 
   return (
+    <>
+    {approveConfirmDialog?.open && (
+      <Dialog open onOpenChange={() => setApproveConfirmDialog(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Có hình chưa xác nhận được phòng</DialogTitle>
+            <DialogDescription asChild>
+              <div>
+                <p>
+                  Có <strong>{approveConfirmDialog.unmatchedCount} hình</strong> chưa nhận diện được phòng và sẽ bị bỏ qua.
+                </p>
+                <p className="mt-1">
+                  Bạn có đồng ý tiếp tục xác nhận{" "}
+                  <strong>{approveConfirmDialog.toApprove.filter(canApproveResult).length} hình</strong>{" "}
+                  đã gán phòng không?
+                </p>
+              </div>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setApproveConfirmDialog(null)}>
+              Không
+            </Button>
+            <Button
+              onClick={() => {
+                const matched = approveConfirmDialog.toApprove.filter(canApproveResult)
+                const msg = approveConfirmDialog.successMsg.replace("{skip}", String(approveConfirmDialog.unmatchedCount))
+                setApproveConfirmDialog(null)
+                executeApproveList(matched, msg)
+              }}
+            >
+              Đồng ý, bỏ qua và xác nhận
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    )}
     <div className="space-y-6 max-w-6xl mx-auto pb-12">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -902,7 +949,7 @@ export default function WorkflowPage() {
               <Button variant="outline" onClick={() => setCurrentStep(1)}>
                 <ArrowLeft className="mr-1 h-4 w-4" /> Quay lại Bước 1
               </Button>
-              <Button onClick={handleGenerateInvoices} disabled={isGeneratingInvoices || !canGenerateInvoices} className="bg-green-600 hover:bg-green-700 text-white font-bold">
+              <Button onClick={() => handleGenerateInvoices()} disabled={isGeneratingInvoices || !canGenerateInvoices} className="bg-green-600 hover:bg-green-700 text-white font-bold">
                 {isGeneratingInvoices ? <Loader2 className="h-4 w-4 animate-spin" /> : "Tạo Hóa Đơn & Sang Bước 3 ➔"}
               </Button>
             </div>
@@ -1247,5 +1294,6 @@ export default function WorkflowPage() {
         )}
       </Dialog>
     </div>
+    </>
   )
 }
