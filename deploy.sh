@@ -3,7 +3,8 @@
 set -e
 
 echo "[deploy] Pulling latest code..."
-git pull origin main
+git fetch origin
+git reset --hard origin/main
 
 echo "[deploy] Building and restarting containers..."
 docker compose build --no-cache
