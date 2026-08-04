@@ -9,7 +9,7 @@ services:
     container_name: aicudan-backend
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8010:8000"
     volumes:
       - backend_data:/app/data
       - backend_uploads:/app/uploads
@@ -29,12 +29,12 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://222.255.119.32:8000}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://aicudan.congsu.ai.vn}
     image: aicudan-frontend:latest
     container_name: aicudan-frontend
     restart: unless-stopped
     ports:
-      - "3001:3000"
+      - "3010:3000"
     depends_on:
       - backend
     networks:
