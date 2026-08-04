@@ -57,45 +57,16 @@ async def test_validate_provider_rejects_invalid_credential(monkeypatch):
     assert exc_info.value.status_code == 400
 
 
-def test_update_env_file_uses_stable_path_and_private_permissions(tmp_path, monkeypatch):
-    env_path = tmp_path / "backend" / ".env"
-    env_path.parent.mkdir()
-    env_path.write_text("UNCHANGED=value\nGEMINI_API_KEY=old\n", encoding="utf-8")
-    os.chmod(env_path, 0o644)
-    monkeypatch.setattr(app_settings, "ENV_PATH", env_path)
-
-    app_settings._update_env_file("GEMINI_API_KEY", "new-secret")
-
-    assert env_path.read_text(encoding="utf-8") == (
-        "UNCHANGED=value\nGEMINI_API_KEY=new-secret\n"
-    )
-    assert env_path.stat().st_mode & 0o777 == 0o600
-
-
-def test_update_env_file_rejects_newline_injection(tmp_path, monkeypatch):
-    env_path = tmp_path / ".env"
-    monkeypatch.setattr(app_settings, "ENV_PATH", env_path)
-
-    with pytest.raises(HTTPException) as exc_info:
-        app_settings._update_env_file("GEMINI_API_KEY", "secret\nADMIN_PASSWORD=owned")
-
-    assert exc_info.value.status_code == 422
-    assert not env_path.exists()
-
-
 @pytest.mark.asyncio
-async def test_settings_update_reports_multi_worker_limitation_without_secret(
+async def test_settings_update_saves_to_db_and_masks_secret(
     client: AsyncClient,
     auth_headers: dict[str, str],
-    tmp_path,
     monkeypatch,
 ):
     async def accept_provider(provider, credential):
         return None
 
-    env_path = tmp_path / ".env"
     secret = "test-gemini-secret"
-    monkeypatch.setattr(app_settings, "ENV_PATH", env_path)
     monkeypatch.setattr(app_settings, "_validate_provider", accept_provider)
     monkeypatch.setattr(app_settings.settings, "GEMINI_API_KEY", "")
     monkeypatch.setitem(os.environ, "GEMINI_API_KEY", "")
@@ -108,7 +79,6 @@ async def test_settings_update_reports_multi_worker_limitation_without_secret(
 
     assert response.status_code == 200
     payload = response.json()
-    assert "worker" in payload["runtime_sync_notice"]
-    assert secret not in payload["runtime_sync_notice"]
+    assert payload["gemini_api_key_set"] is True
+    assert secret not in payload["gemini_api_key_masked"]
     assert payload["gemini_api_key_masked"] != secret
-    assert env_path.stat().st_mode & 0o777 == 0o600

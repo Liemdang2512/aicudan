@@ -140,6 +140,12 @@ async def test_seed_data_rotates_legacy_admin_password_in_production(db_session,
             ADMIN_EMAIL="admin@admin.com",
             ADMIN_PASSWORD="a-strong-production-password",
             ADMIN_FULL_NAME="Admin",
+            GEMINI_API_KEY="",
+            TELEGRAM_BOT_TOKEN="",
+            PAYMENT_MANAGEMENT_UNIT="",
+            PAYMENT_BANK_ACCOUNT="",
+            PAYMENT_BANK_NAME="",
+            PAYMENT_ACCOUNT_HOLDER="",
         ),
     )
 
@@ -170,6 +176,12 @@ async def test_seed_data_preserves_changed_admin_password_in_production(db_sessi
             ADMIN_EMAIL="admin@admin.com",
             ADMIN_PASSWORD="a-strong-production-password",
             ADMIN_FULL_NAME="Admin",
+            GEMINI_API_KEY="",
+            TELEGRAM_BOT_TOKEN="",
+            PAYMENT_MANAGEMENT_UNIT="",
+            PAYMENT_BANK_ACCOUNT="",
+            PAYMENT_BANK_NAME="",
+            PAYMENT_ACCOUNT_HOLDER="",
         ),
     )
 

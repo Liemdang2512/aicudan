@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.core.security import hash_password, verify_password
 from app.db.base import Base
 from app.db.session import engine
+from app.models.app_setting import AppSetting  # noqa: F401
 from app.models.batch_job import BatchJob  # noqa: F401
 from app.models.bot_session import BotSession  # noqa: F401
 from app.models.building import Building  # noqa: F401
@@ -97,6 +98,33 @@ async def normalize_price_configs(db: AsyncSession) -> tuple[int, int]:
     return normalized_count, skipped_count
 
 
+async def load_settings_from_db(db: AsyncSession) -> None:
+    """Load app settings from DB into the runtime settings object.
+
+    Called on startup so that GEMINI_API_KEY, TELEGRAM_BOT_TOKEN and payment
+    fields saved via the UI override any .env defaults without requiring a restart.
+    """
+    from sqlalchemy import select
+
+    result = await db.execute(select(AppSetting).where(AppSetting.id == 1))
+    row = result.scalar_one_or_none()
+    if row is None:
+        return
+    if row.gemini_api_key:
+        settings.GEMINI_API_KEY = row.gemini_api_key
+    if row.telegram_bot_token:
+        settings.TELEGRAM_BOT_TOKEN = row.telegram_bot_token
+    if row.payment_management_unit:
+        settings.PAYMENT_MANAGEMENT_UNIT = row.payment_management_unit
+    if row.payment_bank_account:
+        settings.PAYMENT_BANK_ACCOUNT = row.payment_bank_account
+    if row.payment_bank_name:
+        settings.PAYMENT_BANK_NAME = row.payment_bank_name
+    if row.payment_account_holder:
+        settings.PAYMENT_ACCOUNT_HOLDER = row.payment_account_holder
+    logger.info("App settings loaded from database")
+
+
 async def seed_data(db: AsyncSession):
     from sqlalchemy import select
 
@@ -112,6 +140,7 @@ async def seed_data(db: AsyncSession):
             existing_admin.password_hash = hash_password(settings.ADMIN_PASSWORD)
             await db.commit()
             logger.warning("Rotated legacy seeded admin password during production startup")
+        await _ensure_app_settings(db)
         return
 
     # Create admin user
@@ -155,3 +184,28 @@ async def seed_data(db: AsyncSession):
     db.add(fixed_config)
 
     await db.commit()
+
+    await _ensure_app_settings(db)
+
+
+async def _ensure_app_settings(db: AsyncSession) -> None:
+    """Seed app_settings row id=1 from env if not yet in DB, then load into runtime settings."""
+    from sqlalchemy import select
+
+    result = await db.execute(select(AppSetting).where(AppSetting.id == 1))
+    if result.scalar_one_or_none() is None:
+        db.add(
+            AppSetting(
+                id=1,
+                gemini_api_key=settings.GEMINI_API_KEY,
+                telegram_bot_token=settings.TELEGRAM_BOT_TOKEN,
+                payment_management_unit=settings.PAYMENT_MANAGEMENT_UNIT,
+                payment_bank_account=settings.PAYMENT_BANK_ACCOUNT,
+                payment_bank_name=settings.PAYMENT_BANK_NAME,
+                payment_account_holder=settings.PAYMENT_ACCOUNT_HOLDER,
+            )
+        )
+        await db.commit()
+        logger.info("App settings seeded from environment variables")
+
+    await load_settings_from_db(db)

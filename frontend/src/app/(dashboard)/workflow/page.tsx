@@ -1264,18 +1264,105 @@ export default function WorkflowPage() {
                 Kỳ tính tiền: Tháng {selectedInvoiceForDetail.invoice_month || readingDate.slice(0, 7)}
               </DialogDescription>
             </DialogHeader>
-            <div className="space-y-4 py-2 text-sm">
-              <div className="grid grid-cols-2 gap-3 bg-muted/40 p-3 rounded-lg border text-xs">
+            <div className="space-y-3 py-2 text-sm">
+              {/* Cư dân + chỉ số */}
+              <div className="grid grid-cols-3 gap-2 bg-muted/40 p-3 rounded-lg border text-xs">
                 <div>
                   <span className="text-muted-foreground block">Cư dân:</span>
-                  <span className="font-semibold text-sm">{selectedInvoiceForDetail.resident_name || selectedInvoiceForDetail.tenant_name || "N/A"}</span>
+                  <span className="font-semibold">{selectedInvoiceForDetail.resident_name || "N/A"}</span>
                 </div>
                 <div>
-                  <span className="text-muted-foreground block">Tiêu thụ:</span>
-                  <span className="font-bold text-primary font-mono text-sm">{selectedInvoiceForDetail.consumption} kWh</span>
+                  <span className="text-muted-foreground block">Chỉ số cũ:</span>
+                  <span className="font-mono">{selectedInvoiceForDetail.previous_reading} kWh</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground block">Chỉ số mới:</span>
+                  <span className="font-mono">{selectedInvoiceForDetail.current_reading} kWh</span>
                 </div>
               </div>
-              <div className="flex items-center justify-between p-4 bg-green-500/10 border border-green-500/30 rounded-xl">
+
+              {/* Tiêu thụ */}
+              <div className="flex justify-between text-xs px-1">
+                <span className="text-muted-foreground">Tổng tiêu thụ:</span>
+                <span className="font-bold text-primary font-mono">{selectedInvoiceForDetail.consumption} kWh</span>
+              </div>
+
+              {/* Bảng chi tiết giá */}
+              {(() => {
+                try {
+                  const bd = selectedInvoiceForDetail.price_breakdown
+                    ? JSON.parse(selectedInvoiceForDetail.price_breakdown)
+                    : null
+                  if (!bd) return null
+                  return (
+                    <div className="border rounded-lg overflow-hidden text-xs">
+                      <table className="w-full">
+                        <thead className="bg-muted/60">
+                          <tr>
+                            <th className="px-3 py-2 text-left font-medium">Nội dung</th>
+                            <th className="px-3 py-2 text-right font-medium">kWh</th>
+                            <th className="px-3 py-2 text-right font-medium">Đơn giá</th>
+                            <th className="px-3 py-2 text-right font-medium">Thành tiền</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y">
+                          {bd.tiers
+                            ? bd.tiers.map((t: { name: string; kwh: number; price: number; amount: number }, i: number) => (
+                                <tr key={i}>
+                                  <td className="px-3 py-1.5">{t.name}</td>
+                                  <td className="px-3 py-1.5 text-right font-mono">{t.kwh}</td>
+                                  <td className="px-3 py-1.5 text-right font-mono">{formatCurrency(t.price)}</td>
+                                  <td className="px-3 py-1.5 text-right font-mono">{formatCurrency(t.amount)}</td>
+                                </tr>
+                              ))
+                            : (
+                                <tr>
+                                  <td className="px-3 py-1.5">Giá cố định</td>
+                                  <td className="px-3 py-1.5 text-right font-mono">{selectedInvoiceForDetail.consumption}</td>
+                                  <td className="px-3 py-1.5 text-right font-mono">{formatCurrency(bd.price_per_kwh)}</td>
+                                  <td className="px-3 py-1.5 text-right font-mono">{formatCurrency(bd.subtotal)}</td>
+                                </tr>
+                              )}
+                        </tbody>
+                        <tfoot className="bg-muted/30 divide-y">
+                          <tr>
+                            <td colSpan={3} className="px-3 py-1.5">Tiền điện (trước VAT)</td>
+                            <td className="px-3 py-1.5 text-right font-mono">{formatCurrency(bd.subtotal)}</td>
+                          </tr>
+                          {bd.vat_rate > 0 && (
+                            <tr>
+                              <td colSpan={3} className="px-3 py-1.5">VAT ({Math.round(bd.vat_rate * 100)}%)</td>
+                              <td className="px-3 py-1.5 text-right font-mono">{formatCurrency(bd.vat_amount)}</td>
+                            </tr>
+                          )}
+                        </tfoot>
+                      </table>
+                    </div>
+                  )
+                } catch { return null }
+              })()}
+
+              {/* Phí phụ */}
+              {selectedInvoiceForDetail.additional_fees && (() => {
+                try {
+                  const fees = JSON.parse(selectedInvoiceForDetail.additional_fees) as Record<string, number>
+                  const entries = Object.entries(fees)
+                  if (!entries.length) return null
+                  return (
+                    <div className="text-xs space-y-1 px-1 border-t pt-2">
+                      {entries.map(([name, amount]) => (
+                        <div key={name} className="flex justify-between">
+                          <span className="text-muted-foreground">{name}:</span>
+                          <span className="font-mono">{formatCurrency(amount)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                } catch { return null }
+              })()}
+
+              {/* Tổng */}
+              <div className="flex items-center justify-between p-3 bg-green-500/10 border border-green-500/30 rounded-xl">
                 <span className="font-bold text-sm text-green-800 dark:text-green-300">TỔNG THANH TOÁN:</span>
                 <span className="text-xl font-black text-green-600 dark:text-green-400 font-mono">
                   {formatCurrency(selectedInvoiceForDetail.total_amount)}
