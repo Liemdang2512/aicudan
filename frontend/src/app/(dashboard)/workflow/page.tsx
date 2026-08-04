@@ -342,7 +342,7 @@ export default function WorkflowPage() {
 
       const response = await apiUpload<{ job_id: string }>("/readings/batch-upload", formData)
 
-      toast({ title: "Upload thành công", description: "Gemini Vision AI đang phân tích ảnh...", variant: "success" })
+      toast({ title: "Upload thành công", description: "AI Cư Dân đang phân tích ảnh...", variant: "success" })
       batchAbortRef.current?.abort()
       const controller = new AbortController()
       batchAbortRef.current = controller
@@ -847,7 +847,7 @@ export default function WorkflowPage() {
               Bước 1: Chọn Tòa Nhà & Upload Ảnh Công Tơ Điện
             </CardTitle>
             <CardDescription>
-              Kéo thả hoặc tải lên ảnh công tơ điện. Gemini AI Vision sẽ tự động đọc chỉ số và nhận diện số phòng.
+              Kéo thả hoặc tải lên ảnh công tơ điện. AI Cư Dân sẽ tự động đọc chỉ số và nhận diện số phòng.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -919,12 +919,12 @@ export default function WorkflowPage() {
               {isUploading ? (
                 <div className="flex items-center gap-2">
                   <Loader2 className="h-5 w-5 animate-spin" />
-                  Gemini AI Vision đang đọc chỉ số ({files.length} ảnh)...
+                  AI Cư Dân đang đọc chỉ số ({files.length} ảnh)...
                 </div>
               ) : (
                 <div className="flex items-center gap-2">
                   <Sparkles className="h-5 w-5" />
-                  Bắt Đầu Gemini AI Đọc Chỉ Số ({files.length} ảnh) ➔
+                  Bắt Đầu AI Cư Dân Đọc Chỉ Số ({files.length} ảnh) ➔
                 </div>
               )}
             </Button>
@@ -1283,8 +1283,28 @@ export default function WorkflowPage() {
               </div>
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={() => window.print()} className="gap-1 text-xs">
-                <Printer className="h-3.5 w-3.5" /> In Hóa Đơn
+              <Button
+                variant="outline"
+                className="gap-1 text-xs"
+                onClick={async () => {
+                  try {
+                    const blob = await apiDownload(`/invoices/${selectedInvoiceForDetail.id}/pdf`)
+                    const url = window.URL.createObjectURL(blob)
+                    const a = document.createElement("a")
+                    a.href = url
+                    const month = (selectedInvoiceForDetail.invoice_month ?? "").replace("-", "")
+                    const room = (selectedInvoiceForDetail.room_number || "phong").replace(/\s/g, "_")
+                    a.download = `hoa-don-${room}-${month}.pdf`
+                    document.body.appendChild(a)
+                    a.click()
+                    window.URL.revokeObjectURL(url)
+                    document.body.removeChild(a)
+                  } catch {
+                    toast({ title: "Lỗi xuất PDF", description: "Không thể tải hóa đơn PDF", variant: "destructive" })
+                  }
+                }}
+              >
+                <Printer className="h-3.5 w-3.5" /> Xuất PDF
               </Button>
               <Button onClick={() => setSelectedInvoiceForDetail(null)} className="text-xs">
                 Đóng
