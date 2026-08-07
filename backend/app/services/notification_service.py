@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import httpx
 
 from app.core.config import settings
 
@@ -72,23 +73,29 @@ def format_invoice_message(
     return msg
 
 
-async def send_telegram_message(chat_id: str, text: str, photo_path: str | None = None) -> bool:
-    if not settings.TELEGRAM_BOT_TOKEN:
+
+async def send_telegram_message(chat_id: str, text: str, photo_path: str | None = None, token: str | None = None) -> bool:
+    effective_token = token or settings.TELEGRAM_BOT_TOKEN
+    if not effective_token:
         logger.warning("Telegram bot token not configured")
         return False
 
     try:
-        import telegram
-
-        bot = telegram.Bot(token=settings.TELEGRAM_BOT_TOKEN)
-
-        if photo_path:
-            with open(photo_path, "rb") as photo:
-                await bot.send_photo(chat_id=chat_id, photo=photo, caption=text[:1024])
-        else:
-            await bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
-
-        return True
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            if photo_path:
+                with open(photo_path, "rb") as f:
+                    r = await client.post(
+                        f"https://api.telegram.org/bot{effective_token}/sendPhoto",
+                        data={"chat_id": chat_id, "caption": text[:1024]},
+                        files={"photo": f},
+                    )
+            else:
+                r = await client.post(
+                        f"https://api.telegram.org/bot{effective_token}/sendMessage",
+                        json={"chat_id": chat_id, "text": text},
+                )
+            data = r.json()
+            return bool(data.get("ok"))
     except Exception:
         logger.error("Telegram message delivery failed")
         return False

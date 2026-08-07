@@ -11,6 +11,7 @@ from app.api.v1 import (
     readings,
     rooms,
     telegram_bot,
+    telegram_bot_ktv,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -25,3 +26,4 @@ api_router.include_router(notifications.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(app_settings.router)
 api_router.include_router(telegram_bot.router)
+api_router.include_router(telegram_bot_ktv.router)
