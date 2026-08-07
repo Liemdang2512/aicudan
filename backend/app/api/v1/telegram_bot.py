@@ -33,39 +33,31 @@ from app.models.invoice import Invoice
 from app.models.price_config import PriceConfig
 from app.models.reading import MeterReading
 from app.models.room import Room
-from app.services.ai_service import AIService
 from app.services.billing_service import calculate_invoice
 from app.services.notification_service import format_invoice_message, send_telegram_message
 
 router = APIRouter(prefix="/telegram", tags=["Telegram Bot"])
 logger = logging.getLogger(__name__)
-_ai_service = AIService()
 
 # ---------------------------------------------------------------------------
 # State constants
 # ---------------------------------------------------------------------------
 
 ST_IDLE = "idle"
-ST_AWAITING_MONTH = "awaiting_month"
-ST_COLLECTING = "collecting_photos"
-ST_CONFIRMING = "confirming_photo"
-ST_EDITING_VALUE = "editing_value"
-ST_EDITING_ROOM = "editing_room"
-ST_REVIEWING = "reviewing_summary"
 ST_SELECTING_BUILDING = "selecting_building"
 ST_SELECTING_PRICE = "selecting_price"
 ST_REVIEWING_INVOICES = "reviewing_invoices"
+ST_REVIEWING_STAGED = "reviewing_staged"
+ST_CONFIRMING_DUYET = "confirming_duyet"
 
 # Callback data tokens
-CB_OK = "c:ok"
-CB_EDIT_VAL = "c:ev"
-CB_EDIT_ROOM = "c:er"
-CB_SKIP = "c:skip"
-CB_SUMMARY_OK = "s:ok"
 CB_INVOICE_SEND = "i:send"
 CB_INVOICE_CANCEL = "i:cancel"
 CB_BUILDING = "b:"
 CB_PRICE = "p:"
+CB_DUYET_APPROVE = "d:ok:"
+CB_DUYET_REJECT = "d:no:"
+CB_DUYET_DONE = "d:done"
 
 # ---------------------------------------------------------------------------
 # Low-level Telegram API helpers
@@ -163,31 +155,6 @@ async def _get_session(db: AsyncSession, chat_id: int) -> BotSession:
 # ---------------------------------------------------------------------------
 
 
-def _confirm_keyboard(room_number: str | None) -> dict:  # type: ignore[type-arg]
-    room_label = f"🚪 Sửa phòng: {room_number}" if room_number else "🚪 Nhập số phòng"
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "✅ Đúng rồi", "callback_data": CB_OK},
-                {"text": "✏️ Sửa chỉ số", "callback_data": CB_EDIT_VAL},
-            ],
-            [
-                {"text": room_label, "callback_data": CB_EDIT_ROOM},
-                {"text": "🗑️ Bỏ qua ảnh này", "callback_data": CB_SKIP},
-            ],
-        ]
-    }
-
-
-def _summary_keyboard() -> dict:  # type: ignore[type-arg]
-    return {
-        "inline_keyboard": [
-            [{"text": "✅ Xác nhận — tiếp tục tạo hóa đơn", "callback_data": CB_SUMMARY_OK}],
-            [{"text": "❌ Hủy phiên", "callback_data": CB_INVOICE_CANCEL}],
-        ]
-    }
-
-
 def _invoice_keyboard() -> dict:  # type: ignore[type-arg]
     return {
         "inline_keyboard": [
@@ -251,88 +218,6 @@ def _parse_month(text: str) -> str | None:
         if 1 <= month <= 12:
             return f"{date.today().year}-{month:02d}"
     return None
-
-
-# ---------------------------------------------------------------------------
-# Photo processor
-# ---------------------------------------------------------------------------
-
-
-async def _process_photo(chat_id: int, file_id: str, db: AsyncSession) -> None:
-    """Tải ảnh, chạy AI, cập nhật session → trạng thái confirming_photo."""
-    session = await _get_session(db, chat_id)
-    if session.state not in (ST_COLLECTING,):
-        await _send(chat_id, "Không trong phiên thu ảnh. Gõ /baodien để bắt đầu.")
-        return
-
-    await _send(chat_id, "⏳ Đang đọc ảnh...")
-    photo_data = await _download_photo(file_id)
-    if not photo_data:
-        await _send(chat_id, "❌ Không tải được ảnh. Thử gửi lại.")
-        return
-
-    # Lưu ảnh vào disk
-    upload_dir = settings.upload_path / "telegram"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    photo_path = upload_dir / f"{uuid4().hex}.jpg"
-    photo_path.write_bytes(photo_data)
-
-    # AI đọc
-    ai_result = await _ai_service.extract_meter_reading(str(photo_path))
-    meter_value = ai_result.get("meter_reading")
-    confidence = float(ai_result.get("confidence") or 0.0)
-    room_number_ai = ai_result.get("room_number")
-    notes = ai_result.get("notes", "")
-
-    # Tìm phòng từ số phòng AI đọc được
-    room: Room | None = None
-    if room_number_ai:
-        room_num = room_number_ai.strip().split()[-1]
-        r = await db.execute(
-            select(Room).where(Room.room_number == room_num, Room.is_active == True).limit(1)  # noqa: E712
-        )
-        room = r.scalar_one_or_none()
-
-    data = _load_data(session)
-    data["pending"] = {
-        "image_path": str(photo_path),
-        "meter_value": meter_value,
-        "room_id": room.id if room else None,
-        "room_number": room.room_number if room else room_number_ai,
-        "confidence": confidence,
-        "notes": notes,
-    }
-    _save_data(session, data)
-    session.state = ST_CONFIRMING
-    await db.commit()
-
-    # Xây thông báo xác nhận
-    if meter_value is None:
-        msg = (
-            "❌ Không đọc được chỉ số.\n"
-            f"🔎 AI đọc phòng: {room_number_ai or 'Không rõ'}\n"
-        )
-        if notes:
-            msg += f"📝 Ghi chú: {notes}\n"
-        msg += "\nNhấn ✏️ Sửa chỉ số để nhập tay, hoặc 🗑️ Bỏ qua."
-    else:
-        conf_pct = f"{confidence * 100:.0f}%"
-        room_display = room.room_number if room else (room_number_ai or "Chưa rõ")
-        msg = (
-            f"📸 Ảnh mới\n"
-            f"🔢 Chỉ số: {meter_value:,} kWh (tin cậy {conf_pct})\n"
-            f"🚪 Phòng: {room_display}"
-        )
-        if not room:
-            msg += " ⚠️ (chưa tìm thấy trong hệ thống)"
-        if notes:
-            msg += f"\n📝 {notes}"
-
-    await _send(
-        chat_id,
-        msg,
-        _confirm_keyboard(room.room_number if room else room_number_ai),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -497,17 +382,26 @@ async def _cmd_start(chat_id: int, session: BotSession, db: AsyncSession) -> Non
     if session.is_admin:
         await _send(
             chat_id,
-            "✅ Đã xác thực. Các lệnh:\n"
-            "/baodien — Bắt đầu phiên báo điện\n"
-            "/xong — Kết thúc thu ảnh\n"
-            "/huy — Hủy phiên hiện tại",
+            "✅ Đã xác thực (Quản lý). Các lệnh:\n"
+            "/duyet — Duyệt chỉ số điện mới từ KTV\n"
+            "/id — Xem Chat ID của bạn\n"
+            "/huy — Hủy thao tác hiện tại",
         )
     else:
         await _send(
             chat_id,
-            "Bot báo điện dành riêng cho quản lý tòa nhà.\n\n"
+            "Bot quản lý tòa nhà.\n\n"
             "Xác thực: /admin MẬT_KHẨU",
         )
+
+
+async def _cmd_id(chat_id: int, db: AsyncSession) -> None:
+    """Trả về chat_id của manager để cấu hình App Settings."""
+    await _send(
+        chat_id,
+        f"📋 Chat ID của bạn:\n{chat_id}\n\n"
+        f"Sao chép số này vào App Settings → Manager Chat ID.",
+    )
 
 
 async def _cmd_admin(chat_id: int, text: str, session: BotSession, db: AsyncSession) -> None:
@@ -526,72 +420,167 @@ async def _cmd_admin(chat_id: int, text: str, session: BotSession, db: AsyncSess
         chat_id,
         "✅ Xác thực thành công!\n\n"
         "Các lệnh:\n"
-        "/baodien — Bắt đầu phiên báo điện\n"
-        "/xong — Kết thúc thu ảnh\n"
-        "/huy — Hủy phiên hiện tại",
+        "/duyet — Duyệt chỉ số điện mới từ KTV\n"
+        "/id — Xem Chat ID của bạn\n"
+        "/huy — Hủy thao tác hiện tại",
     )
 
 
-async def _cmd_baodien(chat_id: int, session: BotSession, db: AsyncSession) -> None:
-    _save_data(session, {"readings": [], "pending": None})
+async def _cmd_duyet(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+    if not session.is_admin:
+        await _send(chat_id, "Bot quản lý tòa nhà.\n\nXác thực: /admin MẬT_KHẨU")
+        return
 
-    # Hỏi tòa nhà trước nếu có nhiều tòa
-    bldgs_res = await db.execute(
-        select(Building).where(Building.is_active == True)  # noqa: E712
+    result = await db.execute(
+        select(MeterReading)
+        .where(MeterReading.status == "staged")
+        .order_by(MeterReading.reading_date.desc(), MeterReading.id.desc())
     )
+    staged = result.scalars().all()
+
+    if not staged:
+        await _send(chat_id, "✅ Không có chỉ số nào đang chờ duyệt.")
+        return
+
+    room_ids = list({r.room_id for r in staged})
+    rooms_r = await db.execute(select(Room).where(Room.id.in_(room_ids)))
+    rooms = {r.id: r for r in rooms_r.scalars().all()}
+
+    from collections import defaultdict
+    by_month = defaultdict(list)
+    for r in staged:
+        month_key = r.reading_date.strftime("%Y-%m")
+        by_month[month_key].append(r)
+
+    data = {"duyet_readings": [r.id for r in staged], "duyet_decisions": {}}
+    _save_data(session, data)
+    session.state = ST_REVIEWING_STAGED
+    await db.commit()
+
+    await _send(chat_id, f"📋 DANH SÁCH CHỈ SỐ CHỜ DUYỆT\n\n{len(staged)} chỉ số, {len(by_month)} tháng")
+
+    for i, r in enumerate(staged):
+        if i >= 20:
+            await _send(chat_id, "⚠️ Chỉ hiển thị 20 readings đầu tiên.")
+            break
+        room = rooms.get(r.room_id)
+        room_num = room.room_number if room else f"ID:{r.room_id}"
+        submitted_by_text = f"\nNgười nộp: {r.submitted_by}" if r.submitted_by else ""
+        msg = (
+            f"🚪 Phòng {room_num} | {r.reading_date.strftime('%d/%m/%Y')}{submitted_by_text}\n"
+            f"🔢 {r.meter_value:,} kWh"
+        )
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "✅ Duyệt", "callback_data": f"{CB_DUYET_APPROVE}{r.id}"},
+                {"text": "❌ Từ chối", "callback_data": f"{CB_DUYET_REJECT}{r.id}"},
+            ]]
+        }
+        await _send(chat_id, msg, keyboard)
+
+    done_keyboard = {
+        "inline_keyboard": [[
+            {"text": "✅ Tôi đã duyệt xong — tạo hóa đơn", "callback_data": CB_DUYET_DONE}
+        ], [
+            {"text": "❌ Hủy", "callback_data": CB_INVOICE_CANCEL}
+        ]]
+    }
+    await _send(chat_id, f"Nhấn nút dưới khi đã duyệt xong {len(staged)} chỉ số:", done_keyboard)
+
+
+async def _cb_duyet_approve(chat_id: int, cb_data: str, session: BotSession, db: AsyncSession) -> None:
+    try:
+        reading_id = int(cb_data[len(CB_DUYET_APPROVE):])
+    except ValueError:
+        return
+    r = await db.execute(select(MeterReading).where(MeterReading.id == reading_id))
+    reading = r.scalar_one_or_none()
+    if not reading:
+        await _send(chat_id, f"❌ Không tìm thấy chỉ số ID {reading_id}")
+        return
+    
+    reading.status = "approved"
+    
+    data = _load_data(session)
+    decisions = data.get("duyet_decisions", {})
+    decisions[str(reading_id)] = "approved"
+    data["duyet_decisions"] = decisions
+    _save_data(session, data)
+    await db.commit()
+
+    room_r = await db.execute(select(Room).where(Room.id == reading.room_id))
+    room = room_r.scalar_one_or_none()
+    room_num = room.room_number if room else "?"
+    await _send(chat_id, f"✅ Đã duyệt P.{room_num}: {reading.meter_value:,} kWh")
+
+
+async def _cb_duyet_reject(chat_id: int, cb_data: str, session: BotSession, db: AsyncSession) -> None:
+    try:
+        reading_id = int(cb_data[len(CB_DUYET_REJECT):])
+    except ValueError:
+        return
+    r = await db.execute(select(MeterReading).where(MeterReading.id == reading_id))
+    reading = r.scalar_one_or_none()
+    if not reading:
+        return
+    
+    reading.status = "rejected"
+    
+    data = _load_data(session)
+    decisions = data.get("duyet_decisions", {})
+    decisions[str(reading_id)] = "rejected"
+    data["duyet_decisions"] = decisions
+    _save_data(session, data)
+    await db.commit()
+
+    room_r = await db.execute(select(Room).where(Room.id == reading.room_id))
+    room = room_r.scalar_one_or_none()
+    room_num = room.room_number if room else "?"
+    await _send(chat_id, f"❌ Đã từ chối P.{room_num}: {reading.meter_value:,} kWh")
+
+
+async def _cb_duyet_done(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+    data = _load_data(session)
+    decisions = data.get("duyet_decisions", {})
+    approved_count = sum(1 for v in decisions.values() if v == "approved")
+    rejected_count = sum(1 for v in decisions.values() if v == "rejected")
+    
+    await _send(chat_id, f"📊 Kết quả duyệt:\n✅ Duyệt: {approved_count}\n❌ Từ chối: {rejected_count}")
+    
+    if approved_count == 0:
+        await _send(chat_id, "Không có chỉ số nào được duyệt. Hủy tạo hóa đơn.")
+        session.state = ST_IDLE
+        session.session_data = None
+        await db.commit()
+        return
+
+    # Set month for invoices
+    approved_ids = [int(k) for k, v in decisions.items() if v == "approved"]
+    if approved_ids:
+        r = await db.execute(select(MeterReading).where(MeterReading.id.in_(approved_ids)).limit(1))
+        first = r.scalar_one_or_none()
+        if first:
+            data["month"] = first.reading_date.strftime("%Y-%m")
+            _save_data(session, data)
+            await db.commit()
+
+    bldgs_res = await db.execute(select(Building).where(Building.is_active == True))  # noqa: E712
     buildings = bldgs_res.scalars().all()
-
     if not buildings:
-        await _send(chat_id, "❌ Chưa có tòa nhà nào. Vào web app tạo tòa trước.")
+        await _send(chat_id, "❌ Chưa có tòa nhà.")
         return
 
     if len(buildings) == 1:
-        data = _load_data(session)
         data["building_id"] = buildings[0].id
         _save_data(session, data)
-        session.state = ST_AWAITING_MONTH
+        session.state = ST_SELECTING_PRICE
         await db.commit()
-        current = _current_month()
-        await _send(
-            chat_id,
-            f"🏢 Tòa: {buildings[0].name}\n\n"
-            f"📅 Báo điện tháng nào?\n"
-            f"Nhập: 8, tháng 8, 08/2026, hoặc OK để dùng tháng này ({current}).\n\n"
-            "Gõ /huy để hủy.",
-        )
+        await _ask_price_config(chat_id, session, db)
     else:
         session.state = ST_SELECTING_BUILDING
-        await db.commit()
         kbd = _building_keyboard([(b.id, b.name) for b in buildings])
-        await _send(chat_id, "🏢 Báo điện cho tòa nhà nào?", kbd)
-
-
-async def _cmd_xong(chat_id: int, session: BotSession, db: AsyncSession) -> None:
-    if session.state not in (ST_COLLECTING, ST_CONFIRMING):
-        await _send(chat_id, "Không trong phiên thu ảnh.")
-        return
-
-    data = _load_data(session)
-    readings = data.get("readings", [])
-
-    if not readings:
-        await _send(
-            chat_id,
-            "Chưa có ảnh nào được xác nhận.\nGửi ảnh đồng hồ hoặc /huy để hủy.",
-        )
-        return
-
-    session.state = ST_REVIEWING
-    await db.commit()
-
-    lines = [f"📊 TỔNG KẾT — Tháng {data.get('month', '?')}\n"]
-    for r in readings:
-        conf = f" ({r['confidence'] * 100:.0f}%)" if r.get("confidence") else ""
-        lines.append(f"🚪 P.{r['room_number']}: {r['meter_value']:,} kWh{conf}")
-    lines.append(f"\n✅ {len(readings)} phòng đã ghi nhận.")
-    lines.append("Nhấn xác nhận để lưu chỉ số và tiếp tục tạo hóa đơn.")
-
-    await _send(chat_id, "\n".join(lines), _summary_keyboard())
+        await _send(chat_id, "🏢 Tạo hóa đơn cho tòa nhà nào?", kbd)
+        await db.commit()
 
 
 async def _cmd_huy(chat_id: int, session: BotSession, db: AsyncSession) -> None:
@@ -599,177 +588,6 @@ async def _cmd_huy(chat_id: int, session: BotSession, db: AsyncSession) -> None:
     session.session_data = None
     await db.commit()
     await _send(chat_id, "✅ Đã hủy phiên. Gõ /baodien để bắt đầu lại.")
-
-
-# ---------------------------------------------------------------------------
-# Text input handlers (state-driven)
-# ---------------------------------------------------------------------------
-
-
-async def _handle_month_input(
-    chat_id: int, text: str, session: BotSession, db: AsyncSession
-) -> None:
-    # Enter / OK → tháng hiện tại
-    month = _current_month() if text.lower() in ("", "ok", ".", "enter") else _parse_month(text)
-    if not month:
-        await _send(chat_id, f"❓ Không nhận ra tháng '{text}'.\nThử: 8, tháng 8, 08/2026")
-        return
-    data = _load_data(session)
-    data["month"] = month
-    _save_data(session, data)
-    session.state = ST_COLLECTING
-    await db.commit()
-    await _send(
-        chat_id,
-        f"✅ Tháng {month}\n\n"
-        "📷 Gửi ảnh đồng hồ điện từng phòng.\n"
-        "Bot sẽ xác nhận mỗi ảnh trước khi lưu.\n\n"
-        "Gõ /xong khi gửi hết.",
-    )
-
-
-async def _handle_edit_value_input(
-    chat_id: int, text: str, session: BotSession, db: AsyncSession
-) -> None:
-    try:
-        value = int(text.strip().replace(",", "").replace(".", ""))
-        if value < 0:
-            raise ValueError("âm")
-    except ValueError:
-        await _send(chat_id, "❌ Chỉ số phải là số nguyên dương. Nhập lại:")
-        return
-
-    data = _load_data(session)
-    pending = data.get("pending") or {}
-    pending["meter_value"] = value
-    data["pending"] = pending
-    _save_data(session, data)
-    session.state = ST_CONFIRMING
-    await db.commit()
-
-    room_number = pending.get("room_number")
-    await _send(
-        chat_id,
-        f"✏️ Chỉ số đã sửa: {value:,} kWh\n🚪 Phòng: {room_number or 'Chưa rõ'}",
-        _confirm_keyboard(room_number),
-    )
-
-
-async def _handle_edit_room_input(
-    chat_id: int, text: str, session: BotSession, db: AsyncSession
-) -> None:
-    # Cho phép nhập "B 101" → lấy phần cuối "101"
-    room_num = text.strip().split()[-1]
-    r = await db.execute(
-        select(Room).where(Room.room_number == room_num, Room.is_active == True).limit(1)  # noqa: E712
-    )
-    room = r.scalar_one_or_none()
-    if not room:
-        await _send(chat_id, f"❌ Không tìm thấy phòng '{room_num}'. Nhập lại:")
-        return
-
-    data = _load_data(session)
-    pending = data.get("pending") or {}
-    pending["room_id"] = room.id
-    pending["room_number"] = room.room_number
-    data["pending"] = pending
-    _save_data(session, data)
-    session.state = ST_CONFIRMING
-    await db.commit()
-
-    meter_value = pending.get("meter_value") or 0
-    await _send(
-        chat_id,
-        f"✏️ Phòng đã sửa: {room.room_number}\n🔢 Chỉ số: {meter_value:,} kWh",
-        _confirm_keyboard(room.room_number),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Callback handlers
-# ---------------------------------------------------------------------------
-
-
-async def _cb_confirm_ok(chat_id: int, session: BotSession, db: AsyncSession) -> None:
-    data = _load_data(session)
-    pending = data.get("pending") or {}
-    if pending.get("meter_value") is None:
-        await _send(chat_id, "⚠️ Chỉ số chưa có. Nhấn ✏️ Sửa chỉ số trước.")
-        return
-    if not pending.get("room_id"):
-        await _send(chat_id, "⚠️ Phòng chưa xác định. Nhấn 🚪 Nhập số phòng trước.")
-        return
-
-    readings: list = data.get("readings") or []
-    readings.append(
-        {
-            "room_id": pending["room_id"],
-            "room_number": pending["room_number"],
-            "meter_value": pending["meter_value"],
-            "image_path": pending.get("image_path", ""),
-            "confidence": pending.get("confidence", 0.0),
-        }
-    )
-    data["readings"] = readings
-    data["pending"] = None
-    _save_data(session, data)
-    session.state = ST_COLLECTING
-    await db.commit()
-
-    await _send(
-        chat_id,
-        f"✅ Đã lưu P.{pending['room_number']}: {pending['meter_value']:,} kWh\n"
-        f"({len(readings)} phòng đã ghi nhận)\n\nGửi ảnh tiếp hoặc /xong.",
-    )
-
-
-async def _cb_edit_val(chat_id: int, session: BotSession, db: AsyncSession) -> None:
-    session.state = ST_EDITING_VALUE
-    await db.commit()
-    await _send(chat_id, "✏️ Nhập chỉ số đúng (số nguyên, ví dụ: 1234):")
-
-
-async def _cb_edit_room(chat_id: int, session: BotSession, db: AsyncSession) -> None:
-    session.state = ST_EDITING_ROOM
-    await db.commit()
-    await _send(chat_id, "🚪 Nhập số phòng đúng (ví dụ: 101 hoặc B101):")
-
-
-async def _cb_skip(chat_id: int, session: BotSession, db: AsyncSession) -> None:
-    data = _load_data(session)
-    data["pending"] = None
-    _save_data(session, data)
-    session.state = ST_COLLECTING
-    await db.commit()
-    count = len(data.get("readings") or [])
-    await _send(chat_id, f"🗑️ Đã bỏ qua.\n({count} phòng đã ghi nhận)\n\nGửi ảnh tiếp hoặc /xong.")
-
-
-async def _cb_summary_ok(chat_id: int, session: BotSession, db: AsyncSession) -> None:
-    """Lưu chỉ số vào DB với trạng thái approved → chọn bảng giá."""
-    data = _load_data(session)
-    readings: list[dict] = data.get("readings") or []
-
-    # Lưu readings vào DB với status approved
-    reading_date = date.today()
-    for r in readings:
-        reading = MeterReading(
-            room_id=r["room_id"],
-            reading_date=reading_date,
-            meter_value=r["meter_value"],
-            image_path=r.get("image_path") or None,
-            confidence_score=r.get("confidence") or None,
-            status="approved",
-            notes="[Bot Telegram]",
-        )
-        db.add(reading)
-
-    await db.flush()
-    await db.commit()
-
-    session.state = ST_SELECTING_PRICE
-    await db.commit()
-    await _ask_price_config(chat_id, session, db)
 
 
 async def _ask_price_config(
@@ -856,7 +674,19 @@ async def _generate_and_preview(
 
     await _send(chat_id, "⏳ Đang tính hóa đơn...")
 
-    room_ids = {r["room_id"] for r in readings}
+    if not readings and data.get("duyet_decisions"):
+        approved_reading_ids = [int(k) for k, v in data["duyet_decisions"].items() if v == "approved"]
+        if approved_reading_ids:
+            r = await db.execute(
+                select(MeterReading.room_id)
+                .where(MeterReading.id.in_(approved_reading_ids))
+            )
+            room_ids = {row[0] for row in r.all()}
+        else:
+            room_ids = set()
+    else:
+        room_ids = {r["room_id"] for r in readings}
+
     invoice_results = await _build_invoices(db, building_id, price_config, month, room_ids)
 
     data["invoice_results"] = invoice_results
@@ -1007,41 +837,24 @@ async def _dispatch(update: dict) -> None:  # type: ignore[type-arg]
             await _send(chat_id, "Bot báo điện dành riêng cho quản lý.\n\nXác thực: /admin MẬT_KHẨU")
             return
 
-        # /baodien
-        if text.startswith("/baodien"):
-            await _cmd_baodien(chat_id, session, db)
+        # /duyet
+        if text.startswith("/duyet"):
+            await _cmd_duyet(chat_id, session, db)
             return
 
-        # /xong
-        if text.startswith("/xong"):
-            await _cmd_xong(chat_id, session, db)
+        # /id
+        if text.startswith("/id"):
+            await _cmd_id(chat_id, db)
             return
 
         # Ảnh
         if photos:
-            if session.state != ST_COLLECTING:
-                await _send(
-                    chat_id,
-                    "Gõ /baodien để bắt đầu phiên, rồi gửi ảnh."
-                    if session.state == ST_IDLE
-                    else "Vui lòng xác nhận ảnh hiện tại trước khi gửi ảnh mới.",
-                )
-                return
-            largest = max(photos, key=lambda p: p.get("file_size", 0))
-            await _process_photo(chat_id, largest["file_id"], db)
+            await _send(chat_id, "Bot quản lý không nhận ảnh. Vui lòng dùng ứng dụng KTV.")
             return
 
         # Routing text theo state
-        if session.state == ST_AWAITING_MONTH:
-            await _handle_month_input(chat_id, text, session, db)
-        elif session.state == ST_EDITING_VALUE:
-            await _handle_edit_value_input(chat_id, text, session, db)
-        elif session.state == ST_EDITING_ROOM:
-            await _handle_edit_room_input(chat_id, text, session, db)
-        elif session.state == ST_COLLECTING:
-            await _send(chat_id, "Gửi ảnh đồng hồ hoặc /xong để kết thúc.")
-        elif session.state == ST_IDLE:
-            await _send(chat_id, "Gõ /baodien để bắt đầu phiên báo điện.")
+        if session.state == ST_IDLE:
+            await _send(chat_id, "Gõ /duyet để xem và duyệt chỉ số.")
         else:
             await _send(chat_id, "Sử dụng nút trên màn hình hoặc /huy để hủy.")
 
@@ -1059,16 +872,12 @@ async def _handle_callback_query(callback_query: dict) -> None:  # type: ignore[
         async with async_session() as db:
             session = await _get_session(db, chat_id)
 
-            if cb_data == CB_OK:
-                await _cb_confirm_ok(chat_id, session, db)
-            elif cb_data == CB_EDIT_VAL:
-                await _cb_edit_val(chat_id, session, db)
-            elif cb_data == CB_EDIT_ROOM:
-                await _cb_edit_room(chat_id, session, db)
-            elif cb_data == CB_SKIP:
-                await _cb_skip(chat_id, session, db)
-            elif cb_data == CB_SUMMARY_OK:
-                await _cb_summary_ok(chat_id, session, db)
+            if cb_data.startswith(CB_DUYET_APPROVE):
+                await _cb_duyet_approve(chat_id, cb_data, session, db)
+            elif cb_data.startswith(CB_DUYET_REJECT):
+                await _cb_duyet_reject(chat_id, cb_data, session, db)
+            elif cb_data == CB_DUYET_DONE:
+                await _cb_duyet_done(chat_id, session, db)
             elif cb_data == CB_INVOICE_SEND:
                 await _cb_invoice_send(chat_id, session, db)
             elif cb_data in (CB_INVOICE_CANCEL, "huy"):
