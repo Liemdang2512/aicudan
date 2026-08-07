@@ -31,6 +31,10 @@ class AppSettingsResponse(BaseModel):
     payment_bank_account: str
     payment_bank_name: str
     payment_account_holder: str
+    telegram_ktv_bot_token_set: bool
+    telegram_ktv_bot_token_masked: str
+    telegram_ktv_password_set: bool
+    manager_telegram_chat_id: str
     runtime_sync_notice: str = RUNTIME_SYNC_NOTICE
 
 
@@ -41,6 +45,9 @@ class UpdateSettingsRequest(BaseModel):
     payment_bank_account: str | None = None
     payment_bank_name: str | None = None
     payment_account_holder: str | None = None
+    telegram_ktv_bot_token: str | None = None
+    telegram_ktv_password: str | None = None
+    manager_telegram_chat_id: str | None = None
 
 
 class ValidateSettingsRequest(BaseModel):
@@ -74,6 +81,9 @@ async def _get_or_create_setting(db: AsyncSession) -> AppSetting:
             payment_bank_account=settings.PAYMENT_BANK_ACCOUNT,
             payment_bank_name=settings.PAYMENT_BANK_NAME,
             payment_account_holder=settings.PAYMENT_ACCOUNT_HOLDER,
+            telegram_ktv_bot_token=settings.TELEGRAM_KTV_BOT_TOKEN,
+            telegram_ktv_password=settings.TELEGRAM_KTV_PASSWORD,
+            manager_telegram_chat_id=settings.MANAGER_TELEGRAM_CHAT_ID,
         )
         db.add(row)
         await db.commit()
@@ -93,6 +103,12 @@ def _setting_to_response(row: AppSetting) -> AppSettingsResponse:
         payment_bank_account=row.payment_bank_account,
         payment_bank_name=row.payment_bank_name,
         payment_account_holder=row.payment_account_holder,
+        telegram_ktv_bot_token_set=bool(
+            row.telegram_ktv_bot_token and not row.telegram_ktv_bot_token.startswith("your-")
+        ),
+        telegram_ktv_bot_token_masked=_mask_key(row.telegram_ktv_bot_token),
+        telegram_ktv_password_set=bool(row.telegram_ktv_password),
+        manager_telegram_chat_id=row.manager_telegram_chat_id or "",
     )
 
 
@@ -153,6 +169,9 @@ async def update_settings(
         if credential is not None:
             await _validate_provider(provider, credential)
 
+    if data.telegram_ktv_bot_token is not None:
+        await _validate_provider("telegram", data.telegram_ktv_bot_token)
+
     row = await _get_or_create_setting(db)
 
     if data.gemini_api_key is not None:
@@ -164,6 +183,21 @@ async def update_settings(
         row.telegram_bot_token = data.telegram_bot_token
         settings.TELEGRAM_BOT_TOKEN = data.telegram_bot_token
         os.environ["TELEGRAM_BOT_TOKEN"] = data.telegram_bot_token
+
+    if data.telegram_ktv_bot_token is not None:
+        row.telegram_ktv_bot_token = data.telegram_ktv_bot_token
+        settings.TELEGRAM_KTV_BOT_TOKEN = data.telegram_ktv_bot_token
+        os.environ["TELEGRAM_KTV_BOT_TOKEN"] = data.telegram_ktv_bot_token
+
+    if data.telegram_ktv_password is not None:
+        row.telegram_ktv_password = data.telegram_ktv_password
+        settings.TELEGRAM_KTV_PASSWORD = data.telegram_ktv_password
+        os.environ["TELEGRAM_KTV_PASSWORD"] = data.telegram_ktv_password
+
+    if data.manager_telegram_chat_id is not None:
+        row.manager_telegram_chat_id = data.manager_telegram_chat_id
+        settings.MANAGER_TELEGRAM_CHAT_ID = data.manager_telegram_chat_id
+        os.environ["MANAGER_TELEGRAM_CHAT_ID"] = data.manager_telegram_chat_id
 
     simple_fields = {
         "payment_management_unit": "PAYMENT_MANAGEMENT_UNIT",
@@ -234,6 +268,33 @@ async def setup_telegram_webhook(
         webhook_url=webhook_url,
         description=result.get("description", "Webhook đã được đăng ký"),
     )
+
+
+@router.post("/setup-ktv-webhook", response_model=SetupWebhookResponse)
+async def setup_ktv_telegram_webhook(
+    data: SetupWebhookRequest,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await _get_or_create_setting(db)
+    token = row.telegram_ktv_bot_token or settings.TELEGRAM_KTV_BOT_TOKEN
+    if not token:
+        raise HTTPException(status_code=400, detail="Chưa cấu hình KTV Bot Token")
+    server_url = data.server_url.rstrip("/")
+    webhook_url = f"{server_url}/api/v1/telegram/ktv/webhook"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"https://api.telegram.org/bot{token}/setWebhook",
+                json={"url": webhook_url, "allowed_updates": ["message", "callback_query"]},
+            )
+            r.raise_for_status()
+            result = r.json()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Không thể kết nối: {exc}") from exc
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("description", "Thất bại"))
+    return SetupWebhookResponse(ok=True, webhook_url=webhook_url, description=result.get("description", "OK"))
 
 
 @router.post("/validate", response_model=ValidateSettingsResponse)

@@ -87,6 +87,18 @@ export default function SettingsPage() {
   const [paymentAccountHolder, setPaymentAccountHolder] = useState("")
   const [paymentSaving, setPaymentSaving] = useState(false)
 
+  // Bot KTV settings state
+  const [ktvBotToken, setKtvBotToken] = useState("")
+  const [ktvPassword, setKtvPassword] = useState("")
+  const [ktvBotTokenSet, setKtvBotTokenSet] = useState(false)
+  const [ktvBotTokenMasked, setKtvBotTokenMasked] = useState("")
+  const [ktvPasswordSet, setKtvPasswordSet] = useState(false)
+  const [ktvSaving, setKtvSaving] = useState(false)
+
+  // Manager chat ID state
+  const [managerChatId, setManagerChatId] = useState("")
+  const [managerChatIdSaving, setManagerChatIdSaving] = useState(false)
+
   useEffect(() => {
     fetchPriceConfigs()
     fetchAppSettings()
@@ -101,6 +113,10 @@ export default function SettingsPage() {
         payment_bank_account: string
         payment_bank_name: string
         payment_account_holder: string
+        telegram_ktv_bot_token_set: boolean
+        telegram_ktv_bot_token_masked: string
+        telegram_ktv_password_set: boolean
+        manager_telegram_chat_id: string
       }>("/settings")
       setTelegramKeySet(data.telegram_bot_token_set)
       setTelegramMasked(data.telegram_bot_token_masked)
@@ -108,6 +124,10 @@ export default function SettingsPage() {
       setPaymentBankAccount(data.payment_bank_account || "")
       setPaymentBankName(data.payment_bank_name || "")
       setPaymentAccountHolder(data.payment_account_holder || "")
+      setKtvBotTokenSet(data.telegram_ktv_bot_token_set)
+      setKtvBotTokenMasked(data.telegram_ktv_bot_token_masked)
+      setKtvPasswordSet(data.telegram_ktv_password_set)
+      setManagerChatId(data.manager_telegram_chat_id || "")
     } catch {
       // Settings API might not be available yet
     }
@@ -162,6 +182,41 @@ export default function SettingsPage() {
       })
     } finally {
       setPaymentSaving(false)
+    }
+  }
+
+  const handleSaveKtv = async () => {
+    setKtvSaving(true)
+    try {
+      const payload: Record<string, string> = {}
+      if (ktvBotToken) payload.telegram_ktv_bot_token = ktvBotToken
+      if (ktvPassword) payload.telegram_ktv_password = ktvPassword
+      if (Object.keys(payload).length === 0) {
+        toast({ title: "Không có thay đổi", description: "Nhập token hoặc mật khẩu mới", variant: "destructive" })
+        return
+      }
+      await apiPatch("/settings", payload)
+      toast({ title: "Lưu thành công", description: "Cài đặt Bot KTV đã được cập nhật", variant: "success" })
+      setKtvBotToken("")
+      setKtvPassword("")
+      fetchAppSettings()
+    } catch (error) {
+      toast({ title: "Lỗi", description: error instanceof Error ? error.message : "Không thể lưu", variant: "destructive" })
+    } finally {
+      setKtvSaving(false)
+    }
+  }
+
+  const handleSaveManagerChatId = async () => {
+    setManagerChatIdSaving(true)
+    try {
+      await apiPatch("/settings", { manager_telegram_chat_id: managerChatId })
+      toast({ title: "Lưu thành công", description: "Manager Chat ID đã được cập nhật", variant: "success" })
+      fetchAppSettings()
+    } catch (error) {
+      toast({ title: "Lỗi", description: error instanceof Error ? error.message : "Không thể lưu", variant: "destructive" })
+    } finally {
+      setManagerChatIdSaving(false)
     }
   }
 
@@ -579,6 +634,105 @@ export default function SettingsPage() {
                 <Settings className="mr-2 h-4 w-4" />
               )}
               Lưu Bot Token
+            </Button>
+          </CardContent>
+        </Card>
+
+        {/* Bot KTV Token and Password */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <MessageCircle className="h-5 w-5" />
+              Bot KTV (Kỹ Thuật Viên)
+              {ktvBotTokenSet ? (
+                <CheckCircle2 className="h-4 w-4 text-green-500" />
+              ) : (
+                <XCircle className="h-4 w-4 text-red-500" />
+              )}
+            </CardTitle>
+            <CardDescription>
+              Bot riêng cho kỹ thuật viên gửi ảnh đồng hồ. Cần token từ @BotFather và mật khẩu dùng chung cho KTV.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {ktvBotTokenSet && (
+              <div className="rounded-md bg-green-50 p-3 dark:bg-green-950">
+                <p className="text-sm text-green-800 dark:text-green-200">
+                  Token KTV hiện tại: <code className="font-mono">{ktvBotTokenMasked}</code>
+                </p>
+              </div>
+            )}
+            <div className="space-y-2">
+              <Label>{ktvBotTokenSet ? "Thay đổi Bot KTV Token" : "Nhập Bot KTV Token"}</Label>
+              <Input
+                type="password"
+                value={ktvBotToken}
+                onChange={(e) => setKtvBotToken(e.target.value)}
+                placeholder="Token của Bot KTV từ @BotFather"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>
+                Mật khẩu KTV
+                {ktvPasswordSet && <span className="ml-2 text-xs text-green-600">Đã cấu hình</span>}
+              </Label>
+              <Input
+                type="password"
+                value={ktvPassword}
+                onChange={(e) => setKtvPassword(e.target.value)}
+                placeholder="Mật khẩu để KTV xác thực bot (mật khẩu chung)"
+              />
+              <p className="text-xs text-muted-foreground">
+                KTV dùng lệnh /ktv [mật khẩu này] để xác thực Bot KTV
+              </p>
+            </div>
+            <Button
+              disabled={ktvSaving || (!ktvBotToken && !ktvPassword)}
+              onClick={handleSaveKtv}
+            >
+              {ktvSaving ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Settings className="mr-2 h-4 w-4" />
+              )}
+              Lưu cài đặt Bot KTV
+            </Button>
+          </CardContent>
+        </Card>
+
+        {/* Manager Chat ID */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <MessageCircle className="h-5 w-5" />
+              Nhận thông báo từ KTV
+            </CardTitle>
+            <CardDescription>
+              Chat ID của quản lý để nhận thông báo khi KTV hoàn thành ghi chỉ số. Lấy ID bằng cách gõ /id trong Bot Manager.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>Manager Chat ID</Label>
+              <Input
+                value={managerChatId}
+                onChange={(e) => setManagerChatId(e.target.value)}
+                placeholder="Ví dụ: 123456789"
+              />
+              <p className="text-xs text-muted-foreground">
+                Gõ /id trong Bot Manager để lấy Chat ID của bạn
+              </p>
+            </div>
+            <Button
+              disabled={managerChatIdSaving}
+              onClick={handleSaveManagerChatId}
+            >
+              {managerChatIdSaving ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Settings className="mr-2 h-4 w-4" />
+              )}
+              Lưu Manager Chat ID
             </Button>
           </CardContent>
         </Card>
