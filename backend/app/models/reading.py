@@ -17,6 +17,7 @@ class MeterReading(Base):
     confidence_score: Mapped[float | None] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending/approved/rejected/needs_review
     notes: Mapped[str | None] = mapped_column(Text)
+    submitted_by: Mapped[str | None] = mapped_column(String(200))
     batch_job_id: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

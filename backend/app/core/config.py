@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # Telegram Bot
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_WEBHOOK_SECRET: str = ""
+    TELEGRAM_KTV_BOT_TOKEN: str = ""
+    TELEGRAM_KTV_PASSWORD: str = ""
+    MANAGER_TELEGRAM_CHAT_ID: str = ""
 
     # Invoice payment info (shown on PDF invoice)
     PAYMENT_MANAGEMENT_UNIT: str = ""

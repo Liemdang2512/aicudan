@@ -16,6 +16,7 @@ from app.models.invoice import Invoice  # noqa: F401
 from app.models.price_config import PriceConfig
 from app.models.reading import MeterReading  # noqa: F401
 from app.models.room import Room  # noqa: F401
+from app.models.technician_profile import TechnicianProfile  # noqa: F401
 from app.models.user import User
 from app.schemas.price_config import normalize_legacy_price_config
 
@@ -122,6 +123,12 @@ async def load_settings_from_db(db: AsyncSession) -> None:
         settings.PAYMENT_BANK_NAME = row.payment_bank_name
     if row.payment_account_holder:
         settings.PAYMENT_ACCOUNT_HOLDER = row.payment_account_holder
+    if row.telegram_ktv_bot_token:
+        settings.TELEGRAM_KTV_BOT_TOKEN = row.telegram_ktv_bot_token
+    if row.telegram_ktv_password:
+        settings.TELEGRAM_KTV_PASSWORD = row.telegram_ktv_password
+    if row.manager_telegram_chat_id:
+        settings.MANAGER_TELEGRAM_CHAT_ID = row.manager_telegram_chat_id
     logger.info("App settings loaded from database")
 
 
@@ -203,6 +210,9 @@ async def _ensure_app_settings(db: AsyncSession) -> None:
                 payment_bank_account=settings.PAYMENT_BANK_ACCOUNT,
                 payment_bank_name=settings.PAYMENT_BANK_NAME,
                 payment_account_holder=settings.PAYMENT_ACCOUNT_HOLDER,
+                telegram_ktv_bot_token=settings.TELEGRAM_KTV_BOT_TOKEN,
+                telegram_ktv_password=settings.TELEGRAM_KTV_PASSWORD,
+                manager_telegram_chat_id=settings.MANAGER_TELEGRAM_CHAT_ID,
             )
         )
         await db.commit()

@@ -16,6 +16,9 @@ class AppSetting(Base):
     payment_bank_account: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     payment_bank_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     payment_account_holder: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    telegram_ktv_bot_token: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    telegram_ktv_password: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    manager_telegram_chat_id: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
