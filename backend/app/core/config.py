@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     TELEGRAM_WEBHOOK_SECRET: str = ""
     TELEGRAM_KTV_BOT_TOKEN: str = ""
     TELEGRAM_KTV_PASSWORD: str = ""
+    TELEGRAM_KTV_WEBHOOK_SECRET: str = ""
     MANAGER_TELEGRAM_CHAT_ID: str = ""
 
     # Invoice payment info (shown on PDF invoice)

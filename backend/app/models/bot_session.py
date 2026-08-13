@@ -10,6 +10,7 @@ class BotSession(Base):
     __tablename__ = "bot_sessions"
 
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    bot_type: Mapped[str] = mapped_column(String(20), primary_key=True, default="manager")
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     state: Mapped[str] = mapped_column(String(30), default="idle")
     session_data: Mapped[str | None] = mapped_column(Text)

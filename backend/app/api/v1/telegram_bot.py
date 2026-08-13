@@ -2,14 +2,16 @@
 
 Flow:
   /admin PASSWORD  → xác thực quản lý
-  /baodien         → bắt đầu phiên, chọn tháng
-  [gửi ảnh]        → AI đọc chỉ số → xác nhận từng ảnh (inline keyboard)
-  /xong            → xem tổng hợp → chọn tòa / bảng giá → xem hóa đơn → gửi cư dân
+  /duyet           → xem danh sách chỉ số staged từ KTV → duyệt/từ chối từng reading
+                     → chọn tòa / bảng giá → xem hóa đơn → gửi cư dân
+  /id              → xem Chat ID để cấu hình App Settings
+  /huy             → hủy thao tác hiện tại
 
 Thiết kế:
-  - Mỗi Telegram chat được lưu trạng thái trong bảng `bot_sessions` (SQLite).
+  - Mỗi Telegram chat được lưu trạng thái trong bảng `bot_sessions` (SQLite)
+    với composite PK (chat_id, bot_type="manager").
   - Admin xác thực bằng mật khẩu ADMIN_PASSWORD trong settings.
-  - Bot chỉ phục vụ chủ tòa (không có flow cư dân gửi ảnh).
+  - Bot chỉ phục vụ chủ tòa; KTV dùng bot riêng (telegram_bot_ktv.py).
 """
 
 from __future__ import annotations
@@ -141,10 +143,12 @@ def _save_data(session: BotSession, data: dict) -> None:  # type: ignore[type-ar
 
 
 async def _get_session(db: AsyncSession, chat_id: int) -> BotSession:
-    result = await db.execute(select(BotSession).where(BotSession.chat_id == chat_id))
+    result = await db.execute(
+        select(BotSession).where(BotSession.chat_id == chat_id, BotSession.bot_type == "manager")
+    )
     session = result.scalar_one_or_none()
     if not session:
-        session = BotSession(chat_id=chat_id, state=ST_IDLE, is_admin=False)
+        session = BotSession(chat_id=chat_id, bot_type="manager", state=ST_IDLE, is_admin=False)
         db.add(session)
         await db.flush()
     return session
@@ -564,30 +568,43 @@ async def _cb_duyet_done(chat_id: int, session: BotSession, db: AsyncSession) ->
             _save_data(session, data)
             await db.commit()
 
-    bldgs_res = await db.execute(select(Building).where(Building.is_active == True))  # noqa: E712
-    buildings = bldgs_res.scalars().all()
-    if not buildings:
-        await _send(chat_id, "❌ Chưa có tòa nhà.")
-        return
+    # Auto-detect tòa từ readings đã duyệt
+    building_id = None
+    if approved_ids:
+        room_res = await db.execute(
+            select(Room).where(Room.id == first.room_id).limit(1)
+        )
+        room = room_res.scalar_one_or_none()
+        if room:
+            building_id = room.building_id
 
-    if len(buildings) == 1:
-        data["building_id"] = buildings[0].id
-        _save_data(session, data)
-        session.state = ST_SELECTING_PRICE
-        await db.commit()
-        await _ask_price_config(chat_id, session, db)
-    else:
-        session.state = ST_SELECTING_BUILDING
-        kbd = _building_keyboard([(b.id, b.name) for b in buildings])
-        await _send(chat_id, "🏢 Tạo hóa đơn cho tòa nhà nào?", kbd)
-        await db.commit()
+    if not building_id:
+        bldgs_res = await db.execute(select(Building).where(Building.is_active == True))  # noqa: E712
+        buildings = bldgs_res.scalars().all()
+        if not buildings:
+            await _send(chat_id, "❌ Chưa có tòa nhà.")
+            return
+        if len(buildings) == 1:
+            building_id = buildings[0].id
+        else:
+            session.state = ST_SELECTING_BUILDING
+            kbd = _building_keyboard([(b.id, b.name) for b in buildings])
+            await _send(chat_id, "🏢 Tạo hóa đơn cho tòa nhà nào?", kbd)
+            await db.commit()
+            return
+
+    data["building_id"] = building_id
+    _save_data(session, data)
+    session.state = ST_SELECTING_PRICE
+    await db.commit()
+    await _ask_price_config(chat_id, session, db)
 
 
 async def _cmd_huy(chat_id: int, session: BotSession, db: AsyncSession) -> None:
     session.state = ST_IDLE
     session.session_data = None
     await db.commit()
-    await _send(chat_id, "✅ Đã hủy phiên. Gõ /baodien để bắt đầu lại.")
+    await _send(chat_id, "✅ Đã hủy phiên. Gõ /duyet để xem chỉ số mới.")
 
 
 async def _ask_price_config(
@@ -626,15 +643,9 @@ async def _cb_select_building(
     data = _load_data(session)
     data["building_id"] = building_id
     _save_data(session, data)
-    session.state = ST_AWAITING_MONTH
+    session.state = ST_SELECTING_PRICE
     await db.commit()
-    current = _current_month()
-    await _send(
-        chat_id,
-        f"📅 Báo điện tháng nào?\n"
-        f"Nhập: 8, tháng 8, 08/2026, hoặc OK để dùng tháng này ({current}).\n\n"
-        "Gõ /huy để hủy.",
-    )
+    await _ask_price_config(chat_id, session, db)
 
 
 async def _cb_select_price(
@@ -730,7 +741,10 @@ async def _cb_invoice_send(chat_id: int, session: BotSession, db: AsyncSession) 
             continue
 
         telegram_id = inv.get("telegram_id")
-        if not telegram_id:
+        # Nếu cư dân không có Telegram ID → gửi về cho quản lý xem thay
+        fallback_to_manager = not telegram_id
+        target_id = telegram_id if telegram_id else settings.MANAGER_TELEGRAM_CHAT_ID
+        if not target_id:
             no_telegram += 1
             continue
 
@@ -761,7 +775,10 @@ async def _cb_invoice_send(chat_id: int, session: BotSession, db: AsyncSession) 
             total_amount=invoice.total_amount,
         )
 
-        ok = await send_telegram_message(str(telegram_id), msg)
+        if fallback_to_manager:
+            msg = f"⚠️ Cư dân P.{room.room_number} chưa có Telegram — gửi cho quản lý xem:\n\n" + msg
+
+        ok = await send_telegram_message(str(target_id), msg)
         if ok:
             invoice.sent_status = "sent"
             invoice.sent_at = datetime.now(UTC).replace(tzinfo=None)

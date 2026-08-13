@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.session import async_session
 from app.models.bot_session import BotSession
+from app.models.building import Building
 from app.models.room import Room
 from app.models.reading import MeterReading
 from app.models.technician_profile import TechnicianProfile
@@ -41,6 +42,7 @@ KTV_AWAITING_NAME = "ktv_awaiting_name"
 KTV_AWAITING_PHONE = "ktv_awaiting_phone"
 KTV_AWAITING_UPDATE_NAME = "ktv_awaiting_update_name"
 KTV_AWAITING_UPDATE_PHONE = "ktv_awaiting_update_phone"
+KTV_AWAITING_BUILDING = "ktv_awaiting_building"
 KTV_AWAITING_MONTH = "ktv_awaiting_month"
 KTV_COLLECTING = "ktv_collecting"
 KTV_CONFIRMING = "ktv_confirming"
@@ -55,6 +57,7 @@ CB_KTV_EDIT_ROOM = "k:er"
 CB_KTV_SKIP = "k:skip"
 CB_KTV_SUMMARY_OK = "k:sok"
 CB_KTV_CANCEL = "k:cancel"
+CB_KTV_BUILDING_PREFIX = "k:b:"
 
 # ---------------------------------------------------------------------------
 # Low-level Telegram API helpers
@@ -146,10 +149,12 @@ def _save_data(session: BotSession, data: dict) -> None:
 
 
 async def _get_ktv_session(db: AsyncSession, chat_id: int) -> BotSession:
-    result = await db.execute(select(BotSession).where(BotSession.chat_id == chat_id))
+    result = await db.execute(
+        select(BotSession).where(BotSession.chat_id == chat_id, BotSession.bot_type == "ktv")
+    )
     session = result.scalar_one_or_none()
     if not session:
-        session = BotSession(chat_id=chat_id, state=KTV_IDLE, is_admin=False)
+        session = BotSession(chat_id=chat_id, bot_type="ktv", state=KTV_IDLE, is_admin=False)
         db.add(session)
         await db.flush()
     return session
@@ -180,6 +185,13 @@ async def _save_profile(db: AsyncSession, chat_id: int, ktv_name: str, ktv_phone
 # ---------------------------------------------------------------------------
 # Keyboard builders
 # ---------------------------------------------------------------------------
+
+def _ktv_building_keyboard(buildings: list) -> dict:
+    rows = []
+    for b in buildings:
+        rows.append([{"text": b.name, "callback_data": f"{CB_KTV_BUILDING_PREFIX}{b.id}"}])
+    return {"inline_keyboard": rows}
+
 
 def _ktv_confirm_keyboard(room_number: str | None) -> dict:
     room_label = f"🚪 Sửa phòng: {room_number}" if room_number else "🚪 Nhập số phòng"
@@ -300,15 +312,16 @@ async def _cmd_ktv_baodien(chat_id: int, session: BotSession, db: AsyncSession) 
         await _ktv_send(chat_id, "Vui lòng nhập tên đầy đủ của bạn:")
         return
 
+    result = await db.execute(select(Building).where(Building.is_active == True))  # noqa: E712
+    buildings = result.scalars().all()
+    if not buildings:
+        await _ktv_send(chat_id, "❌ Chưa có tòa nhà nào trong hệ thống. Liên hệ quản lý.")
+        return
+
     _save_data(session, {"readings": [], "pending": None})
-    session.state = KTV_AWAITING_MONTH
+    session.state = KTV_AWAITING_BUILDING
     await db.commit()
-    current = _current_month()
-    await _ktv_send(
-        chat_id,
-        f"📅 Báo điện tháng nào? Nhập: 8, tháng 8, 08/2026, hoặc OK cho tháng này ({current}).\n\n"
-        "Gõ /huy để hủy."
-    )
+    await _ktv_send(chat_id, "🏢 Chọn tòa nhà bạn đang thu chỉ số:", _ktv_building_keyboard(buildings))
 
 
 async def _cmd_ktv_xong(chat_id: int, session: BotSession, db: AsyncSession) -> None:
@@ -326,7 +339,11 @@ async def _cmd_ktv_xong(chat_id: int, session: BotSession, db: AsyncSession) -> 
     await db.commit()
 
     month = data.get("month", "?")
-    lines = [f"📊 TỔNG KẾT — Tháng {month}\n"]
+    building_name = data.get("building_name", "")
+    header = f"📊 TỔNG KẾT — Tháng {month}"
+    if building_name:
+        header += f" — {building_name}"
+    lines = [header + "\n"]
     for r in readings:
         lines.append(f"🚪 P.{r['room_number']}: {r['meter_value']:,} kWh")
     lines.append(f"\n✅ {len(readings)} phòng đã ghi nhận.")
@@ -441,12 +458,16 @@ async def _handle_ktv_edit_value_input(chat_id: int, text: str, session: BotSess
 
 async def _handle_ktv_edit_room_input(chat_id: int, text: str, session: BotSession, db: AsyncSession) -> None:
     room_num = text.strip().split()[-1]
-    r = await db.execute(
-        select(Room).where(Room.room_number == room_num, Room.is_active == True).limit(1)  # noqa: E712
-    )
+    data = _load_data(session)
+    building_id = data.get("building_id")
+    query = select(Room).where(Room.room_number == room_num, Room.is_active == True)  # noqa: E712
+    if building_id:
+        query = query.where(Room.building_id == building_id)
+    r = await db.execute(query.limit(1))
     room = r.scalar_one_or_none()
     if not room:
-        await _ktv_send(chat_id, f"❌ Không tìm thấy phòng '{room_num}'. Nhập lại:")
+        building_hint = f" trong tòa này" if building_id else ""
+        await _ktv_send(chat_id, f"❌ Không tìm thấy phòng '{room_num}'{building_hint}. Nhập lại:")
         return
 
     data = _load_data(session)
@@ -493,15 +514,18 @@ async def _ktv_process_photo(chat_id: int, file_id: str, db: AsyncSession) -> No
     room_number_ai = ai_result.get("room_number")
     notes = ai_result.get("notes", "")
 
+    data = _load_data(session)
+    building_id = data.get("building_id")
+
     room: Room | None = None
     if room_number_ai:
         room_num = room_number_ai.strip().split()[-1]
-        r = await db.execute(
-            select(Room).where(Room.room_number == room_num, Room.is_active == True).limit(1)  # noqa: E712
-        )
+        query = select(Room).where(Room.room_number == room_num, Room.is_active == True)  # noqa: E712
+        if building_id:
+            query = query.where(Room.building_id == building_id)
+        r = await db.execute(query.limit(1))
         room = r.scalar_one_or_none()
 
-    data = _load_data(session)
     data["pending"] = {
         "image_path": str(photo_path),
         "meter_value": meter_value,
@@ -541,6 +565,29 @@ async def _ktv_process_photo(chat_id: int, file_id: str, db: AsyncSession) -> No
 # ---------------------------------------------------------------------------
 # Callback handlers
 # ---------------------------------------------------------------------------
+
+async def _cb_ktv_select_building(chat_id: int, building_id: int, session: BotSession, db: AsyncSession) -> None:
+    result = await db.execute(select(Building).where(Building.id == building_id, Building.is_active == True))  # noqa: E712
+    building = result.scalar_one_or_none()
+    if not building:
+        await _ktv_send(chat_id, "❌ Tòa nhà không hợp lệ. Thử lại /baodien.")
+        return
+
+    data = _load_data(session)
+    data["building_id"] = building.id
+    data["building_name"] = building.name
+    _save_data(session, data)
+    session.state = KTV_AWAITING_MONTH
+    await db.commit()
+
+    current = _current_month()
+    await _ktv_send(
+        chat_id,
+        f"🏢 Tòa: {building.name}\n\n"
+        f"📅 Báo điện tháng nào? Nhập: 8, tháng 8, 08/2026, hoặc OK cho tháng này ({current}).\n\n"
+        "Gõ /huy để hủy."
+    )
+
 
 async def _cb_ktv_confirm_ok(chat_id: int, session: BotSession, db: AsyncSession) -> None:
     data = _load_data(session)
@@ -597,14 +644,15 @@ async def _cb_ktv_skip(chat_id: int, session: BotSession, db: AsyncSession) -> N
     await _ktv_send(chat_id, f"🗑️ Đã bỏ qua. ({count} phòng)\n\nGửi ảnh tiếp hoặc /xong.")
 
 
-async def _notify_manager(count: int, ktv_name: str, month: str) -> None:
+async def _notify_manager(count: int, ktv_name: str, month: str, building_name: str = "") -> None:
     manager_chat_id = settings.MANAGER_TELEGRAM_CHAT_ID
     if not manager_chat_id:
         logger.warning("MANAGER_TELEGRAM_CHAT_ID chưa được cấu hình, không thể gửi thông báo cho quản lý.")
         return
     parts = month.split("-")
     month_display = f"{int(parts[1])}/{parts[0]}" if len(parts) == 2 else month
-    msg = f"📥 Có {count} chỉ số mới từ {ktv_name}, tháng {month_display}. Dùng /duyet để xem."
+    building_part = f" — {building_name}" if building_name else ""
+    msg = f"📥 Có {count} chỉ số mới từ {ktv_name}, tháng {month_display}{building_part}. Dùng /duyet để xem."
     await _manager_api("sendMessage", chat_id=int(manager_chat_id), text=msg)
 
 
@@ -633,6 +681,7 @@ async def _cb_ktv_summary_ok(chat_id: int, session: BotSession, db: AsyncSession
     await db.commit()
 
     month = data.get("month", "")
+    building_name = data.get("building_name", "")
     count = len(readings)
 
     session.state = KTV_IDLE
@@ -640,7 +689,7 @@ async def _cb_ktv_summary_ok(chat_id: int, session: BotSession, db: AsyncSession
     await db.commit()
 
     await _ktv_send(chat_id, f"✅ Đã ghi nhận {count} chỉ số tháng {month}.\n\nQuản lý sẽ nhận thông báo để duyệt.")
-    await _notify_manager(count, ktv_name, month)
+    await _notify_manager(count, ktv_name, month, building_name)
 
 
 async def _handle_ktv_callback(callback_query: dict, db: AsyncSession) -> None:
@@ -652,7 +701,10 @@ async def _handle_ktv_callback(callback_query: dict, db: AsyncSession) -> None:
     session = await _get_ktv_session(db, chat_id)
 
     try:
-        if cb_data == CB_KTV_OK:
+        if cb_data.startswith(CB_KTV_BUILDING_PREFIX):
+            building_id = int(cb_data[len(CB_KTV_BUILDING_PREFIX):])
+            await _cb_ktv_select_building(chat_id, building_id, session, db)
+        elif cb_data == CB_KTV_OK:
             await _cb_ktv_confirm_ok(chat_id, session, db)
         elif cb_data == CB_KTV_EDIT_VAL:
             await _cb_ktv_edit_val(chat_id, session, db)
@@ -674,7 +726,7 @@ async def _handle_ktv_callback(callback_query: dict, db: AsyncSession) -> None:
 # ---------------------------------------------------------------------------
 
 async def _ktv_dispatch(update: dict) -> None:
-    async for db in async_session():
+    async with async_session() as db:
         try:
             callback_query = update.get("callback_query")
             if callback_query:
@@ -730,6 +782,8 @@ async def _ktv_dispatch(update: dict) -> None:
                 await _handle_ktv_name_input(chat_id, text, session, db)
             elif session.state in (KTV_AWAITING_PHONE, KTV_AWAITING_UPDATE_PHONE):
                 await _handle_ktv_phone_input(chat_id, text, session, db)
+            elif session.state == KTV_AWAITING_BUILDING:
+                await _ktv_send(chat_id, "Vui lòng chọn tòa nhà bằng nút bên trên. Gõ /huy để hủy.")
             elif session.state == KTV_AWAITING_MONTH:
                 await _handle_ktv_month_input(chat_id, text, session, db)
             elif session.state == KTV_EDITING_VALUE:
@@ -745,8 +799,6 @@ async def _ktv_dispatch(update: dict) -> None:
 
         except Exception:
             logger.exception("Lỗi trong KTV dispatch")
-        finally:
-            break
 
 
 # ---------------------------------------------------------------------------
@@ -759,6 +811,10 @@ async def telegram_ktv_webhook(
     background_tasks: BackgroundTasks,
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
 ) -> dict:
+    webhook_secret = getattr(settings, "TELEGRAM_KTV_WEBHOOK_SECRET", "")
+    if webhook_secret and x_telegram_bot_api_secret_token != webhook_secret:
+        raise HTTPException(status_code=403, detail="Invalid secret token")
+
     try:
         update = await request.json()
     except Exception:
