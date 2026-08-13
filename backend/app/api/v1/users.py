@@ -1,12 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
-from app.core.security import create_access_token, hash_password
+from app.api.deps import get_current_user, require_admin
+from app.core.security import hash_password, verify_password
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.user import RegisterRequest, UserResponse
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -45,6 +51,20 @@ async def create_user(
     await db.commit()
     await db.refresh(user)
     return UserResponse.model_validate(user)
+
+
+@router.patch("/me/password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_my_password(
+    body: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not verify_password(body.current_password, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="Mật khẩu hiện tại không đúng")
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=422, detail="Mật khẩu mới phải có ít nhất 8 ký tự")
+    current_user.password_hash = hash_password(body.new_password)
+    await db.commit()
 
 
 @router.patch("/{user_id}/toggle-active", response_model=UserResponse)

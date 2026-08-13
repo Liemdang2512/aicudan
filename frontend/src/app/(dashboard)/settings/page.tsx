@@ -112,6 +112,10 @@ export default function SettingsPage() {
   const [userFormLoading, setUserFormLoading] = useState(false)
   const [userForm, setUserForm] = useState({ full_name: "", email: "", phone: "", password: "" })
 
+  // Change password state
+  const [pwForm, setPwForm] = useState({ current_password: "", new_password: "", confirm: "" })
+  const [pwSaving, setPwSaving] = useState(false)
+
   useEffect(() => {
     fetchPriceConfigs()
     fetchAppSettings()
@@ -165,6 +169,34 @@ export default function SettingsPage() {
       fetchAccounts()
     } catch (error) {
       toast({ title: "Lỗi", description: error instanceof Error ? error.message : "Không thể thực hiện", variant: "destructive" })
+    }
+  }
+
+  const handleChangePassword = async () => {
+    if (!pwForm.current_password || !pwForm.new_password) {
+      toast({ title: "Lỗi", description: "Vui lòng điền đầy đủ thông tin", variant: "destructive" })
+      return
+    }
+    if (pwForm.new_password.length < 8) {
+      toast({ title: "Lỗi", description: "Mật khẩu mới phải có ít nhất 8 ký tự", variant: "destructive" })
+      return
+    }
+    if (pwForm.new_password !== pwForm.confirm) {
+      toast({ title: "Lỗi", description: "Xác nhận mật khẩu không khớp", variant: "destructive" })
+      return
+    }
+    setPwSaving(true)
+    try {
+      await apiPatch("/users/me/password", {
+        current_password: pwForm.current_password,
+        new_password: pwForm.new_password,
+      })
+      toast({ title: "Đổi mật khẩu thành công", variant: "success" })
+      setPwForm({ current_password: "", new_password: "", confirm: "" })
+    } catch (error) {
+      toast({ title: "Lỗi", description: error instanceof Error ? error.message : "Không thể đổi mật khẩu", variant: "destructive" })
+    } finally {
+      setPwSaving(false)
     }
   }
 
@@ -1006,6 +1038,55 @@ export default function SettingsPage() {
               ))}
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* Change password */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Settings className="h-5 w-5" />
+            Đổi mật khẩu
+          </CardTitle>
+          <CardDescription>Đổi mật khẩu cho tài khoản hiện tại</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="space-y-2">
+              <Label>Mật khẩu hiện tại</Label>
+              <Input
+                type="password"
+                placeholder="Nhập mật khẩu hiện tại"
+                value={pwForm.current_password}
+                onChange={(e) => setPwForm((f) => ({ ...f, current_password: e.target.value }))}
+                disabled={pwSaving}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Mật khẩu mới</Label>
+              <Input
+                type="password"
+                placeholder="Ít nhất 8 ký tự"
+                value={pwForm.new_password}
+                onChange={(e) => setPwForm((f) => ({ ...f, new_password: e.target.value }))}
+                disabled={pwSaving}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Xác nhận mật khẩu mới</Label>
+              <Input
+                type="password"
+                placeholder="Nhập lại mật khẩu mới"
+                value={pwForm.confirm}
+                onChange={(e) => setPwForm((f) => ({ ...f, confirm: e.target.value }))}
+                disabled={pwSaving}
+              />
+            </div>
+          </div>
+          <Button onClick={handleChangePassword} disabled={pwSaving}>
+            {pwSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Settings className="mr-2 h-4 w-4" />}
+            Đổi mật khẩu
+          </Button>
         </CardContent>
       </Card>
 
