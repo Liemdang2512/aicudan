@@ -108,6 +108,8 @@ ENV PATH="/app/.venv/bin:$PATH"
 COPY app/ ./app/
 COPY alembic/ ./alembic/
 COPY alembic.ini ./
+COPY entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
 # Persist data và uploads qua Docker volume
 RUN mkdir -p /app/data /app/uploads
@@ -119,5 +121,5 @@ USER appuser
 
 EXPOSE 8000
 
-# 1 worker vì SQLite không hỗ trợ multi-writer an toàn
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# Chạy migration trước, rồi mới start uvicorn
+CMD ["./entrypoint.sh"]
