@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import date
 from io import BytesIO
 from pathlib import Path
@@ -5,7 +6,7 @@ from zipfile import BadZipFile, ZipFile
 
 import openpyxl
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -31,19 +32,23 @@ ALLOWED_EXCEL_MIME_TYPES = {
 
 
 def _room_response(room: Room) -> RoomResponse:
+    """Build RoomResponse from a Room with preloaded .readings (selectinload)."""
+    return _build_room_response(room, list(room.readings))
+
+
+def _build_room_response(room: Room, readings: list[MeterReading]) -> RoomResponse:
+    """Build RoomResponse from a Room + explicitly provided readings list."""
     response = RoomResponse.model_validate(room)
     sorted_readings = sorted(
-        room.readings,
-        key=lambda reading: (reading.reading_date, reading.created_at),
+        readings,
+        key=lambda r: (r.reading_date, r.created_at),
         reverse=True,
     )
-    approved_readings = [reading for reading in sorted_readings if reading.status == "approved"]
-    if approved_readings:
-        response.current_reading = approved_readings[0].meter_value
+    approved = [r for r in sorted_readings if r.status == "approved"]
+    if approved:
+        response.current_reading = approved[0].meter_value
         response.previous_reading = (
-            approved_readings[1].meter_value
-            if len(approved_readings) > 1
-            else room.initial_reading
+            approved[1].meter_value if len(approved) > 1 else room.initial_reading
         )
         response.consumption = response.current_reading - response.previous_reading
     else:
@@ -58,6 +63,40 @@ def _room_response(room: Room) -> RoomResponse:
             history_item.image_path = f"/readings/{reading.id}/image"
         response.readings_history.append(history_item)
     return response
+
+
+async def _bulk_load_recent_readings(
+    db: AsyncSession,
+    room_ids: list[int],
+    limit_per_room: int = 10,
+) -> dict[int, list[MeterReading]]:
+    """Load up to `limit_per_room` most recent readings per room in a single query
+    using a window function — avoids loading the entire history for every room.
+    """
+    if not room_ids:
+        return {}
+
+    rn = func.row_number().over(
+        partition_by=MeterReading.room_id,
+        order_by=[MeterReading.reading_date.desc(), MeterReading.id.desc()],
+    ).label("rn")
+
+    subq = (
+        select(MeterReading.id, rn)
+        .where(MeterReading.room_id.in_(room_ids))
+        .subquery()
+    )
+
+    result = await db.execute(
+        select(MeterReading)
+        .join(subq, MeterReading.id == subq.c.id)
+        .where(subq.c.rn <= limit_per_room)
+        .order_by(MeterReading.room_id, MeterReading.reading_date.desc(), MeterReading.id.desc())
+    )
+    readings_by_room: dict[int, list[MeterReading]] = defaultdict(list)
+    for reading in result.scalars().all():
+        readings_by_room[reading.room_id].append(reading)
+    return readings_by_room
 
 
 async def _read_excel_upload(file: UploadFile) -> bytes:
@@ -106,7 +145,7 @@ async def list_rooms(
     if not bld_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Tòa nhà không tồn tại")
 
-    query = select(Room).where(Room.building_id == building_id).options(selectinload(Room.readings))
+    query = select(Room).where(Room.building_id == building_id)
 
     if is_active is not None:
         query = query.where(Room.is_active == is_active)
@@ -118,12 +157,12 @@ async def list_rooms(
     query = query.order_by(Room.room_number)
     result = await db.execute(query)
     rooms = result.scalars().all()
-    
-    rooms_response = []
-    for r in rooms:
-        rooms_response.append(_room_response(r))
 
-    return rooms_response
+    # Bulk-load only last 10 readings per room (window function) instead of all readings
+    room_ids = [r.id for r in rooms]
+    readings_by_room = await _bulk_load_recent_readings(db, room_ids, limit_per_room=10)
+
+    return [_build_room_response(r, readings_by_room.get(r.id, [])) for r in rooms]
 
 
 @router.post(

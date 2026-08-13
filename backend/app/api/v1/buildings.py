@@ -61,17 +61,15 @@ async def get_building(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Single query: fetch building + room_count together
     result = await db.execute(
-        select(Building).where(Building.id == building_id, Building.owner_id == current_user.id)
+        select(Building, _room_count_expression().label("room_count"))
+        .where(Building.id == building_id, Building.owner_id == current_user.id)
     )
-    building = result.scalar_one_or_none()
-    if not building:
+    row = result.first()
+    if not row:
         raise HTTPException(status_code=404, detail="Tòa nhà không tồn tại")
-
-    room_count_result = await db.execute(
-        select(_room_count_expression()).where(Building.id == building.id)
-    )
-    return _building_response(building, room_count_result.scalar_one())
+    return _building_response(row[0], row[1])
 
 
 @router.patch("/{building_id}", response_model=BuildingResponse)
@@ -93,11 +91,14 @@ async def update_building(
         setattr(building, field, value)
 
     await db.commit()
-    await db.refresh(building)
-    room_count_result = await db.execute(
-        select(_room_count_expression()).where(Building.id == building.id)
+
+    # Single query after update
+    rc_result = await db.execute(
+        select(Building, _room_count_expression().label("room_count"))
+        .where(Building.id == building_id)
     )
-    return _building_response(building, room_count_result.scalar_one())
+    row = rc_result.first()
+    return _building_response(row[0], row[1])
 
 
 @router.delete("/{building_id}", status_code=status.HTTP_204_NO_CONTENT)

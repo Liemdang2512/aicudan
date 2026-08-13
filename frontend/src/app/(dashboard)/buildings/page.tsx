@@ -18,7 +18,7 @@ import {
   AlertCircle,
   Download,
 } from "lucide-react"
-import * as XLSX from "xlsx"
+// xlsx is loaded on-demand to avoid adding ~450KB to the initial bundle
 import {
   Card,
   CardContent,
@@ -293,8 +293,9 @@ export default function BuildingsPage() {
     }
   }
 
-  // Download Excel template
-  const downloadTemplate = () => {
+  // Download Excel template — xlsx loaded lazily (~450KB)
+  const downloadTemplate = async () => {
+    const XLSX = await import("xlsx")
     const headers = ["STT", "ID Phòng", "Tên Phòng", "Tên Đại Diện", "Chỉ Số Cũ", "Chỉ Số Mới", "", "", "", "", "Số Điện Thoại", "Email"]
     const rows = [
       [1, "B 101", "B 101", "Nguyễn Văn A", 1000, 1100, "", "", "", "", "0901234567", "example@email.com"],
@@ -308,13 +309,14 @@ export default function BuildingsPage() {
     XLSX.writeFile(wb, "mau-danh-sach-phong.xlsx")
   }
 
-  // Import Excel
+  // Import Excel — xlsx loaded lazily
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0]
       setImportFile(file)
 
       try {
+        const XLSX = await import("xlsx")
         const reader = new FileReader()
         reader.onload = (evt) => {
           const bstr = evt.target?.result
