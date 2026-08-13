@@ -339,37 +339,26 @@ export default function InvoicesPage() {
   }
 
   const handleExportExcel = async () => {
-    if (!filterBuilding || filterBuilding === "all") {
-      toast({
-        title: "Chưa chọn tòa nhà",
-        description: "Chọn một tòa nhà trước khi xuất Excel.",
-        variant: "destructive",
-      })
-      return
-    }
-
     try {
-      const queryString = new URLSearchParams({
-        building_id: filterBuilding,
-        invoice_month: filterMonth,
-      }).toString()
-      const blob = await apiDownload(
-        `/invoices/export/excel?${queryString}`
-      )
+      const params = new URLSearchParams({ invoice_month: filterMonth })
+      if (filterBuilding && filterBuilding !== "all") {
+        params.set("building_id", filterBuilding)
+      }
+      const blob = await apiDownload(`/invoices/export/excel?${params.toString()}`)
 
-      // Trigger download
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement("a")
       a.href = url
-      a.download = `hoa-don-${filterMonth || "all"}.xlsx`
+      a.download = `bao-cao-tien-dien-${filterMonth}.xlsx`
       document.body.appendChild(a)
       a.click()
       window.URL.revokeObjectURL(url)
       document.body.removeChild(a)
 
+      const scope = filterBuilding && filterBuilding !== "all" ? "tòa nhà đã chọn" : "tất cả tòa nhà"
       toast({
         title: "Export thành công",
-        description: "File Excel đã được tải về",
+        description: `File Excel ${scope} tháng ${filterMonth} đã tải về`,
         variant: "success",
       })
     } catch (error) {

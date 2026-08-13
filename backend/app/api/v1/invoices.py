@@ -378,58 +378,156 @@ async def download_invoice_pdf(
 
 @router.get("/export/excel")
 async def export_excel(
-    building_id: int,
     invoice_month: str,
+    building_id: int | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     import openpyxl
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
 
     _month_bounds(invoice_month)
-    await _get_owned_building(db, building_id, current_user.id)
 
-    result = await db.execute(
-        select(Invoice, Room)
+    # Build query — filter by specific building or all buildings owned by user
+    q = (
+        select(Invoice, Room, Building)
         .join(Room, Invoice.room_id == Room.id)
+        .join(Building, Room.building_id == Building.id)
         .where(
-            Room.building_id == building_id,
+            Building.owner_id == current_user.id,
             Invoice.invoice_month == invoice_month,
         )
-        .order_by(Invoice.room_id)
     )
-    invoices = result.all()
+    if building_id is not None:
+        q = q.where(Building.id == building_id)
+    q = q.order_by(Building.name, Room.room_number)
+
+    result = await db.execute(q)
+    rows = result.all()
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = f"Hóa đơn {invoice_month}"
+    ws.title = f"Tháng {invoice_month}"
 
-    headers = ["STT", "Phòng", "Cư dân", "Chỉ số cũ", "Chỉ số mới", "Tiêu thụ (kWh)", "Tiền điện", "Phụ phí", "Tổng cộng", "Trạng thái"]
+    # Styles
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill("solid", fgColor="1E40AF")
+    total_font = Font(bold=True, size=11)
+    total_fill = PatternFill("solid", fgColor="DBEAFE")
+    center = Alignment(horizontal="center", vertical="center")
+    thin = Side(style="thin", color="CBD5E1")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # Title row
+    title = f"BÁO CÁO TIỀN ĐIỆN THÁNG {invoice_month}"
+    ws.merge_cells("A1:K1")
+    title_cell = ws["A1"]
+    title_cell.value = title
+    title_cell.font = Font(bold=True, size=14, color="1E3A5F")
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 28
+
+    ws.append([])  # blank row
+
+    # Headers
+    headers = [
+        "STT", "Tòa nhà", "Phòng", "Cư dân",
+        "Chỉ số cũ", "Chỉ số mới", "Tiêu thụ (kWh)",
+        "Đơn giá (đ/kWh)", "Tiền điện (đ)", "Phụ phí (đ)",
+        "Tổng cộng (đ)",
+    ]
     ws.append(headers)
+    header_row = ws.max_row
+    for col_idx, _ in enumerate(headers, 1):
+        cell = ws.cell(row=header_row, column=col_idx)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center
+        cell.border = border
+    ws.row_dimensions[header_row].height = 22
 
-    for i, (inv, room) in enumerate(invoices, 1):
-        fees = 0
+    # Data rows
+    total_consumption = 0
+    total_electricity = 0.0
+    total_fees = 0.0
+    total_amount = 0.0
+
+    for i, (inv, room, building) in enumerate(rows, 1):
+        fees = 0.0
         if inv.additional_fees:
             fees_data = json.loads(inv.additional_fees)
-            fees = sum(fees_data.values())
+            fees = float(sum(fees_data.values()))
 
-        ws.append([
+        # Derive average unit price from price_breakdown if available
+        unit_price = 0.0
+        if inv.price_breakdown:
+            try:
+                bd = json.loads(inv.price_breakdown)
+                if isinstance(bd, list) and bd:
+                    unit_price = sum(t.get("amount", 0) for t in bd) / inv.consumption if inv.consumption else 0
+                elif isinstance(bd, dict):
+                    unit_price = bd.get("unit_price", 0) or (inv.electricity_amount / inv.consumption if inv.consumption else 0)
+            except Exception:
+                pass
+        if unit_price == 0 and inv.consumption:
+            unit_price = round(inv.electricity_amount / inv.consumption, 2)
+
+        data_row = [
             i,
+            _excel_safe(building.name),
             _excel_safe(room.room_number),
             _excel_safe(room.resident_name or ""),
             inv.previous_reading,
             inv.current_reading,
             inv.consumption,
+            round(unit_price),
             inv.electricity_amount,
             fees,
             inv.total_amount,
-            inv.sent_status,
-        ])
+        ]
+        ws.append(data_row)
+        row_idx = ws.max_row
+        for col_idx in range(1, len(headers) + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.border = border
+            if col_idx in (1, 5, 6, 7):
+                cell.alignment = center
+            if col_idx >= 5:
+                cell.number_format = "#,##0"
+
+        total_consumption += inv.consumption
+        total_electricity += inv.electricity_amount
+        total_fees += fees
+        total_amount += inv.total_amount
+
+    # Totals row
+    ws.append([])
+    ws.append([
+        "", "TỔNG CỘNG", "", "",
+        "", "", total_consumption,
+        "", total_electricity,
+        total_fees, total_amount,
+    ])
+    total_row = ws.max_row
+    for col_idx in range(1, len(headers) + 1):
+        cell = ws.cell(row=total_row, column=col_idx)
+        cell.font = total_font
+        cell.fill = total_fill
+        cell.border = border
+        if col_idx >= 5:
+            cell.number_format = "#,##0"
+
+    # Column widths
+    col_widths = [5, 18, 10, 20, 11, 11, 15, 16, 15, 13, 16]
+    for col_idx, width in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
 
-    filename = f"hoa_don_{invoice_month}.xlsx"
+    filename = f"bao-cao-tien-dien-{invoice_month}.xlsx"
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
