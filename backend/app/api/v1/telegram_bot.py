@@ -60,6 +60,7 @@ CB_PRICE = "p:"
 CB_DUYET_APPROVE = "d:ok:"
 CB_DUYET_REJECT = "d:no:"
 CB_DUYET_DONE = "d:done"
+CB_DUYET_ALL = "d:all"
 
 # ---------------------------------------------------------------------------
 # Low-level Telegram API helpers
@@ -461,7 +462,57 @@ async def _cmd_duyet(chat_id: int, session: BotSession, db: AsyncSession) -> Non
     session.state = ST_REVIEWING_STAGED
     await db.commit()
 
-    await _send(chat_id, f"📋 DANH SÁCH CHỈ SỐ CHỜ DUYỆT\n\n{len(staged)} chỉ số, {len(by_month)} tháng")
+    # Tóm tắt danh sách gọn
+    lines = [f"📋 {len(staged)} chỉ số chờ duyệt ({len(by_month)} tháng)\n"]
+    for i, r in enumerate(staged[:20]):
+        room = rooms.get(r.room_id)
+        room_num = room.room_number if room else f"ID:{r.room_id}"
+        by_text = f" ({r.submitted_by})" if r.submitted_by else ""
+        lines.append(f"• P.{room_num}: {r.meter_value:,} kWh{by_text}")
+    if len(staged) > 20:
+        lines.append(f"… và {len(staged) - 20} chỉ số nữa")
+
+    quick_keyboard = {
+        "inline_keyboard": [
+            [{"text": f"✅ Duyệt tất cả {len(staged)} chỉ số", "callback_data": CB_DUYET_ALL}],
+            [{"text": "🔍 Duyệt từng cái", "callback_data": "d:manual"}],
+            [{"text": "❌ Hủy", "callback_data": CB_INVOICE_CANCEL}],
+        ]
+    }
+    await _send(chat_id, "\n".join(lines), quick_keyboard)
+
+
+async def _cb_duyet_all(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+    """Duyệt tất cả staged readings cùng lúc."""
+    data = _load_data(session)
+    reading_ids = data.get("duyet_readings") or []
+    if not reading_ids:
+        await _send(chat_id, "❌ Không có chỉ số nào.")
+        return
+
+    result = await db.execute(select(MeterReading).where(MeterReading.id.in_(reading_ids)))
+    readings = result.scalars().all()
+    for r in readings:
+        r.status = "approved"
+
+    decisions = {str(r.id): "approved" for r in readings}
+    data["duyet_decisions"] = decisions
+    _save_data(session, data)
+    await db.commit()
+
+    await _send(chat_id, f"✅ Đã duyệt tất cả {len(readings)} chỉ số.")
+    await _cb_duyet_done(chat_id, session, db)
+
+
+async def _cb_duyet_manual(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+    """Hiển thị từng reading để duyệt thủ công."""
+    data = _load_data(session)
+    reading_ids = data.get("duyet_readings") or []
+    result = await db.execute(select(MeterReading).where(MeterReading.id.in_(reading_ids)))
+    staged = result.scalars().all()
+    room_ids = list({r.room_id for r in staged})
+    rooms_r = await db.execute(select(Room).where(Room.id.in_(room_ids)))
+    rooms = {r.id: r for r in rooms_r.scalars().all()}
 
     for i, r in enumerate(staged):
         if i >= 20:
@@ -471,7 +522,7 @@ async def _cmd_duyet(chat_id: int, session: BotSession, db: AsyncSession) -> Non
         room_num = room.room_number if room else f"ID:{r.room_id}"
         submitted_by_text = f"\nNgười nộp: {r.submitted_by}" if r.submitted_by else ""
         msg = (
-            f"🚪 Phòng {room_num} | {r.reading_date.strftime('%d/%m/%Y')}{submitted_by_text}\n"
+            f"🚪 P.{room_num} | {r.reading_date.strftime('%d/%m/%Y')}{submitted_by_text}\n"
             f"🔢 {r.meter_value:,} kWh"
         )
         keyboard = {
@@ -483,13 +534,12 @@ async def _cmd_duyet(chat_id: int, session: BotSession, db: AsyncSession) -> Non
         await _send(chat_id, msg, keyboard)
 
     done_keyboard = {
-        "inline_keyboard": [[
-            {"text": "✅ Tôi đã duyệt xong — tạo hóa đơn", "callback_data": CB_DUYET_DONE}
-        ], [
-            {"text": "❌ Hủy", "callback_data": CB_INVOICE_CANCEL}
-        ]]
+        "inline_keyboard": [
+            [{"text": "✅ Xong — tạo hóa đơn", "callback_data": CB_DUYET_DONE}],
+            [{"text": "❌ Hủy", "callback_data": CB_INVOICE_CANCEL}],
+        ]
     }
-    await _send(chat_id, f"Nhấn nút dưới khi đã duyệt xong {len(staged)} chỉ số:", done_keyboard)
+    await _send(chat_id, f"Đã duyệt xong {len(staged)} chỉ số?", done_keyboard)
 
 
 async def _cb_duyet_approve(chat_id: int, cb_data: str, session: BotSession, db: AsyncSession) -> None:
@@ -889,7 +939,11 @@ async def _handle_callback_query(callback_query: dict) -> None:  # type: ignore[
         async with async_session() as db:
             session = await _get_session(db, chat_id)
 
-            if cb_data.startswith(CB_DUYET_APPROVE):
+            if cb_data == CB_DUYET_ALL:
+                await _cb_duyet_all(chat_id, session, db)
+            elif cb_data == "d:manual":
+                await _cb_duyet_manual(chat_id, session, db)
+            elif cb_data.startswith(CB_DUYET_APPROVE):
                 await _cb_duyet_approve(chat_id, cb_data, session, db)
             elif cb_data.startswith(CB_DUYET_REJECT):
                 await _cb_duyet_reject(chat_id, cb_data, session, db)

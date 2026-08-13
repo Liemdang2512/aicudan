@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -89,6 +89,18 @@ async def _ktv_send(chat_id: int, text: str, reply_markup: dict | None = None) -
     if result and result.get("ok"):
         return result["result"]["message_id"]
     return None
+
+
+async def _ktv_send_photo(chat_id: int, file_id: str, caption: str, reply_markup: dict | None = None) -> int | None:
+    """Gửi ảnh kèm caption và inline keyboard (dùng file_id từ Telegram)."""
+    payload = {"chat_id": chat_id, "photo": file_id, "caption": caption}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    result = await _ktv_api("sendPhoto", **payload)
+    if result and result.get("ok"):
+        return result["result"]["message_id"]
+    # Fallback: nếu sendPhoto lỗi, gửi text
+    return await _ktv_send(chat_id, caption, reply_markup)
 
 
 async def _ktv_answer_callback(callback_query_id: str, text: str = "") -> None:
@@ -318,10 +330,27 @@ async def _cmd_ktv_baodien(chat_id: int, session: BotSession, db: AsyncSession) 
         await _ktv_send(chat_id, "❌ Chưa có tòa nhà nào trong hệ thống. Liên hệ quản lý.")
         return
 
-    _save_data(session, {"readings": [], "pending": None})
-    session.state = KTV_AWAITING_BUILDING
-    await db.commit()
-    await _ktv_send(chat_id, "🏢 Chọn tòa nhà bạn đang thu chỉ số:", _ktv_building_keyboard(buildings))
+    month = _current_month()
+    data = {"pending": None, "month": month}
+
+    if len(buildings) == 1:
+        # Auto-chọn tòa duy nhất, bỏ qua bước chọn tháng
+        data["building_id"] = buildings[0].id
+        data["building_name"] = buildings[0].name
+        _save_data(session, data)
+        session.state = KTV_COLLECTING
+        await db.commit()
+        await _ktv_send(
+            chat_id,
+            f"🏢 {buildings[0].name} — Tháng {month}\n\n"
+            "📷 Gửi ảnh đồng hồ điện từng phòng.\n"
+            "Gõ /xong khi gửi hết.",
+        )
+    else:
+        _save_data(session, data)
+        session.state = KTV_AWAITING_BUILDING
+        await db.commit()
+        await _ktv_send(chat_id, f"🏢 Chọn tòa nhà (tháng {month}):", _ktv_building_keyboard(buildings))
 
 
 async def _cmd_ktv_xong(chat_id: int, session: BotSession, db: AsyncSession) -> None:
@@ -329,8 +358,13 @@ async def _cmd_ktv_xong(chat_id: int, session: BotSession, db: AsyncSession) -> 
         await _ktv_send(chat_id, "Không trong phiên thu ảnh.")
         return
 
-    data = _load_data(session)
-    readings = data.get("readings", [])
+    result = await db.execute(
+        select(MeterReading).where(
+            MeterReading.status == "pre_staged",
+            MeterReading.notes == f"[KTV:{chat_id}]",
+        )
+    )
+    readings = result.scalars().all()
     if not readings:
         await _ktv_send(chat_id, "Chưa có ảnh nào được xác nhận. Gửi ảnh hoặc /huy.")
         return
@@ -338,14 +372,22 @@ async def _cmd_ktv_xong(chat_id: int, session: BotSession, db: AsyncSession) -> 
     session.state = KTV_REVIEWING
     await db.commit()
 
+    data = _load_data(session)
     month = data.get("month", "?")
     building_name = data.get("building_name", "")
     header = f"📊 TỔNG KẾT — Tháng {month}"
     if building_name:
         header += f" — {building_name}"
     lines = [header + "\n"]
+
+    room_ids = [r.room_id for r in readings]
+    rooms_result = await db.execute(select(Room).where(Room.id.in_(room_ids)))
+    rooms_map = {room.id: room for room in rooms_result.scalars().all()}
     for r in readings:
-        lines.append(f"🚪 P.{r['room_number']}: {r['meter_value']:,} kWh")
+        room = rooms_map.get(r.room_id)
+        room_num = room.room_number if room else f"ID:{r.room_id}"
+        lines.append(f"🚪 P.{room_num}: {r.meter_value:,} kWh")
+
     lines.append(f"\n✅ {len(readings)} phòng đã ghi nhận.")
     lines.append("Xác nhận để gửi cho quản lý duyệt.")
 
@@ -353,6 +395,12 @@ async def _cmd_ktv_xong(chat_id: int, session: BotSession, db: AsyncSession) -> 
 
 
 async def _cmd_ktv_huy(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+    await db.execute(
+        delete(MeterReading).where(
+            MeterReading.status == "pre_staged",
+            MeterReading.notes == f"[KTV:{chat_id}]",
+        )
+    )
     session.state = KTV_IDLE
     session.session_data = None
     await db.commit()
@@ -457,17 +505,22 @@ async def _handle_ktv_edit_value_input(chat_id: int, text: str, session: BotSess
 
 
 async def _handle_ktv_edit_room_input(chat_id: int, text: str, session: BotSession, db: AsyncSession) -> None:
-    room_num = text.strip().split()[-1]
+    input_text = text.strip()
     data = _load_data(session)
     building_id = data.get("building_id")
-    query = select(Room).where(Room.room_number == room_num, Room.is_active == True)  # noqa: E712
-    if building_id:
-        query = query.where(Room.building_id == building_id)
-    r = await db.execute(query.limit(1))
-    room = r.scalar_one_or_none()
+    room: Room | None = None
+    # Thử exact match trước, rồi last word
+    for candidate in dict.fromkeys([input_text, input_text.split()[-1]]):
+        q = select(Room).where(Room.room_number == candidate, Room.is_active == True)  # noqa: E712
+        if building_id:
+            q = q.where(Room.building_id == building_id)
+        r = await db.execute(q.limit(1))
+        room = r.scalar_one_or_none()
+        if room:
+            break
     if not room:
-        building_hint = f" trong tòa này" if building_id else ""
-        await _ktv_send(chat_id, f"❌ Không tìm thấy phòng '{room_num}'{building_hint}. Nhập lại:")
+        building_hint = " trong tòa này" if building_id else ""
+        await _ktv_send(chat_id, f"❌ Không tìm thấy phòng '{input_text}'{building_hint}. Nhập lại:")
         return
 
     data = _load_data(session)
@@ -519,15 +572,55 @@ async def _ktv_process_photo(chat_id: int, file_id: str, db: AsyncSession) -> No
 
     room: Room | None = None
     if room_number_ai:
-        room_num = room_number_ai.strip().split()[-1]
-        query = select(Room).where(Room.room_number == room_num, Room.is_active == True)  # noqa: E712
-        if building_id:
-            query = query.where(Room.building_id == building_id)
-        r = await db.execute(query.limit(1))
-        room = r.scalar_one_or_none()
+        ai_room = room_number_ai.strip()
+        # Thử exact match trước, rồi fallback last word (vd: "B 2543" → "2543")
+        for candidate in dict.fromkeys([ai_room, ai_room.split()[-1]]):
+            q = select(Room).where(Room.room_number == candidate, Room.is_active == True)  # noqa: E712
+            if building_id:
+                q = q.where(Room.building_id == building_id)
+            r = await db.execute(q.limit(1))
+            room = r.scalar_one_or_none()
+            if room:
+                break
+
+    # Auto-confirm nếu tin cậy cao (≥95%) và tìm được phòng
+    # Dùng INSERT trực tiếp vào DB (pre_staged) thay vì ghi vào session_data JSON
+    # → tránh race condition khi album nhiều ảnh đến đồng thời
+    AUTO_CONFIRM_THRESHOLD = 0.95
+    if meter_value is not None and room and confidence >= AUTO_CONFIRM_THRESHOLD:
+        db.add(MeterReading(
+            room_id=room.id,
+            reading_date=date.today(),
+            meter_value=meter_value,
+            image_path=str(photo_path),
+            confidence_score=confidence,
+            status="pre_staged",
+            notes=f"[KTV:{chat_id}]",
+        ))
+        data["pending"] = None
+        _save_data(session, data)
+        session.state = KTV_COLLECTING
+        await db.commit()
+
+        count_result = await db.execute(
+            select(func.count()).select_from(MeterReading).where(
+                MeterReading.status == "pre_staged",
+                MeterReading.notes == f"[KTV:{chat_id}]",
+            )
+        )
+        count = count_result.scalar_one()
+        conf_pct = f"{confidence * 100:.0f}%"
+        await _ktv_send(
+            chat_id,
+            f"✅ P.{room.room_number}: {meter_value:,} kWh (tin cậy {conf_pct} — tự xác nhận)\n"
+            f"({count} phòng)\n\nGửi ảnh tiếp hoặc /xong.",
+        )
+        await _ktv_process_queued_photo(chat_id, db)
+        return
 
     data["pending"] = {
         "image_path": str(photo_path),
+        "file_id": file_id,
         "meter_value": meter_value,
         "room_id": room.id if room else None,
         "room_number": room.room_number if room else room_number_ai,
@@ -550,7 +643,6 @@ async def _ktv_process_photo(chat_id: int, file_id: str, db: AsyncSession) -> No
         conf_pct = f"{confidence * 100:.0f}%"
         room_display = room.room_number if room else (room_number_ai or "Chưa rõ")
         msg = (
-            f"📸 Ảnh mới\n"
             f"🔢 Chỉ số: {meter_value:,} kWh (tin cậy {conf_pct})\n"
             f"🚪 Phòng: {room_display}"
         )
@@ -559,7 +651,25 @@ async def _ktv_process_photo(chat_id: int, file_id: str, db: AsyncSession) -> No
         if notes:
             msg += f"\n📝 {notes}"
 
-    await _ktv_send(chat_id, msg, _ktv_confirm_keyboard(room.room_number if room else room_number_ai))
+    await _ktv_send_photo(chat_id, file_id, msg, _ktv_confirm_keyboard(room.room_number if room else room_number_ai))
+
+
+# ---------------------------------------------------------------------------
+# Photo queue processor
+# ---------------------------------------------------------------------------
+
+async def _ktv_process_queued_photo(chat_id: int, db: AsyncSession) -> None:
+    """Xử lý ảnh tiếp theo trong queue (nếu có) sau khi confirm xong."""
+    session = await _get_ktv_session(db, chat_id)
+    data = _load_data(session)
+    queue = data.get("photo_queue") or []
+    if not queue or session.state != KTV_COLLECTING:
+        return
+    next_file_id = queue.pop(0)
+    data["photo_queue"] = queue
+    _save_data(session, data)
+    await db.commit()
+    await _ktv_process_photo(chat_id, next_file_id, db)
 
 
 # ---------------------------------------------------------------------------
@@ -574,18 +684,18 @@ async def _cb_ktv_select_building(chat_id: int, building_id: int, session: BotSe
         return
 
     data = _load_data(session)
+    month = data.get("month") or _current_month()
     data["building_id"] = building.id
     data["building_name"] = building.name
+    data["month"] = month
     _save_data(session, data)
-    session.state = KTV_AWAITING_MONTH
+    session.state = KTV_COLLECTING
     await db.commit()
-
-    current = _current_month()
     await _ktv_send(
         chat_id,
-        f"🏢 Tòa: {building.name}\n\n"
-        f"📅 Báo điện tháng nào? Nhập: 8, tháng 8, 08/2026, hoặc OK cho tháng này ({current}).\n\n"
-        "Gõ /huy để hủy."
+        f"🏢 {building.name} — Tháng {month}\n\n"
+        "📷 Gửi ảnh đồng hồ điện từng phòng.\n"
+        "Gõ /xong khi gửi hết.",
     )
 
 
@@ -599,27 +709,35 @@ async def _cb_ktv_confirm_ok(chat_id: int, session: BotSession, db: AsyncSession
         await _ktv_send(chat_id, "⚠️ Phòng chưa xác định. Nhấn 🚪 Nhập số phòng trước.")
         return
 
-    readings = data.get("readings") or []
-    readings.append(
-        {
-            "room_id": pending["room_id"],
-            "room_number": pending["room_number"],
-            "meter_value": pending["meter_value"],
-            "image_path": pending.get("image_path", ""),
-            "confidence": pending.get("confidence", 0.0),
-        }
-    )
-    data["readings"] = readings
+    db.add(MeterReading(
+        room_id=pending["room_id"],
+        reading_date=date.today(),
+        meter_value=pending["meter_value"],
+        image_path=pending.get("image_path") or None,
+        confidence_score=pending.get("confidence") or None,
+        status="pre_staged",
+        notes=f"[KTV:{chat_id}]",
+    ))
     data["pending"] = None
     _save_data(session, data)
     session.state = KTV_COLLECTING
     await db.commit()
 
+    count_result = await db.execute(
+        select(func.count()).select_from(MeterReading).where(
+            MeterReading.status == "pre_staged",
+            MeterReading.notes == f"[KTV:{chat_id}]",
+        )
+    )
+    count = count_result.scalar_one()
+    queue = data.get("photo_queue") or []
+    queue_msg = f" ({len(queue)} ảnh trong hàng chờ)" if queue else ""
     await _ktv_send(
         chat_id,
         f"✅ Đã lưu P.{pending['room_number']}: {pending['meter_value']:,} kWh\n"
-        f"({len(readings)} phòng)\n\nGửi ảnh tiếp hoặc /xong.",
+        f"({count} phòng){queue_msg}\n\nGửi ảnh tiếp hoặc /xong.",
     )
+    await _ktv_process_queued_photo(chat_id, db)
 
 
 async def _cb_ktv_edit_val(chat_id: int, session: BotSession, db: AsyncSession) -> None:
@@ -657,29 +775,23 @@ async def _notify_manager(count: int, ktv_name: str, month: str, building_name: 
 
 
 async def _cb_ktv_summary_ok(chat_id: int, session: BotSession, db: AsyncSession) -> None:
-    data = _load_data(session)
-    readings = data.get("readings") or []
-    
+    result = await db.execute(
+        select(MeterReading).where(
+            MeterReading.status == "pre_staged",
+            MeterReading.notes == f"[KTV:{chat_id}]",
+        )
+    )
+    readings = result.scalars().all()
+
     profile = await _get_profile(db, chat_id)
     ktv_name = profile.ktv_name if profile else "Unknown KTV"
-    reading_date = date.today()
 
     for r in readings:
-        reading = MeterReading(
-            room_id=r["room_id"],
-            reading_date=reading_date,
-            meter_value=r["meter_value"],
-            image_path=r.get("image_path") or None,
-            confidence_score=r.get("confidence") or None,
-            status="staged",
-            notes="[Bot KTV Telegram]",
-            submitted_by=ktv_name,
-        )
-        db.add(reading)
+        r.status = "staged"
+        r.submitted_by = ktv_name
+        r.notes = "[Bot KTV Telegram]"
 
-    await db.flush()
-    await db.commit()
-
+    data = _load_data(session)
     month = data.get("month", "")
     building_name = data.get("building_name", "")
     count = len(readings)
@@ -768,14 +880,20 @@ async def _ktv_dispatch(update: dict) -> None:
                 return
 
             if photos:
-                if session.state != KTV_COLLECTING:
-                    if session.state == KTV_CONFIRMING:
-                        await _ktv_send(chat_id, "Xác nhận ảnh hiện tại trước khi gửi ảnh mới.")
-                    else:
-                        await _ktv_send(chat_id, "Gõ /baodien để bắt đầu thu ảnh.")
-                    return
                 largest_photo = max(photos, key=lambda p: p.get("file_size", 0))
-                await _ktv_process_photo(chat_id, largest_photo["file_id"], db)
+                if session.state == KTV_COLLECTING:
+                    await _ktv_process_photo(chat_id, largest_photo["file_id"], db)
+                elif session.state == KTV_CONFIRMING:
+                    # Queue ảnh để xử lý sau khi confirm xong
+                    data = _load_data(session)
+                    queue = data.get("photo_queue") or []
+                    queue.append(largest_photo["file_id"])
+                    data["photo_queue"] = queue
+                    _save_data(session, data)
+                    await db.commit()
+                    await _ktv_send(chat_id, f"📥 Đã thêm vào hàng chờ ({len(queue)} ảnh). Xác nhận ảnh trên trước.")
+                else:
+                    await _ktv_send(chat_id, "Gõ /baodien để bắt đầu thu ảnh.")
                 return
 
             if session.state in (KTV_AWAITING_NAME, KTV_AWAITING_UPDATE_NAME):

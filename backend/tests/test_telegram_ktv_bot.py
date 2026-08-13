@@ -1,5 +1,6 @@
 import pytest
 import pytest_asyncio
+from datetime import date
 from unittest.mock import AsyncMock, patch
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -147,17 +148,22 @@ async def test_ktv_summary_saves_staged_readings(db):
     db.add(room)
     await db.flush()
 
-    # Setup: BotSession với readings data
+    # Setup: BotSession
     session = await _get_ktv_session(db, chat_id)
     session.is_admin = True
-    readings_data = {
-        "month": "2026-08",
-        "readings": [
-            {"room_id": room.id, "room_number": "101", "meter_value": 1500, "image_path": None, "confidence": 0.95}
-        ],
-        "pending": None
-    }
-    _save_data(session, readings_data)
+    _save_data(session, {"month": "2026-08", "pending": None})
+
+    # Setup: pre_staged MeterReading (thay vì lưu trong session_data JSON)
+    pre_staged = MeterReading(
+        room_id=room.id,
+        reading_date=date(2026, 8, 1),
+        meter_value=1500,
+        image_path=None,
+        confidence_score=0.95,
+        status="pre_staged",
+        notes=f"[KTV:{chat_id}]",
+    )
+    db.add(pre_staged)
     await db.commit()
 
     sent_messages = []
