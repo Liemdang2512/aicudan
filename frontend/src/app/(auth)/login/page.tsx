@@ -2,7 +2,6 @@
 
 import React, { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
-import Link from "next/link"
 import { Zap, Eye, EyeOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -127,12 +126,6 @@ export default function LoginPage() {
               "Đăng nhập"
             )}
           </Button>
-          <p className="text-center text-sm text-muted-foreground">
-            Chưa có tài khoản?{" "}
-            <Link href="/register" className="font-medium text-primary hover:underline">
-              Đăng ký ngay
-            </Link>
-          </p>
         </CardFooter>
       </form>
     </Card>

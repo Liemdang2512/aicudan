@@ -12,6 +12,10 @@ import {
   CheckCircle2,
   XCircle,
   Building2,
+  Users,
+  UserPlus,
+  ShieldCheck,
+  ShieldOff,
 } from "lucide-react"
 import {
   Card,
@@ -40,6 +44,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog"
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api"
+import { useAuthStore } from "@/stores/auth-store"
 import type {
   FixedPriceConfig,
   PriceConfigContract,
@@ -99,10 +104,69 @@ export default function SettingsPage() {
   const [managerChatId, setManagerChatId] = useState("")
   const [managerChatIdSaving, setManagerChatIdSaving] = useState(false)
 
+  // Account management state
+  const { user: currentUser } = useAuthStore()
+  const [accounts, setAccounts] = useState<Array<{ id: number; email: string; full_name: string; phone: string | null; role: string; is_active: boolean; created_at: string }>>([])
+  const [accountsLoading, setAccountsLoading] = useState(false)
+  const [showUserDialog, setShowUserDialog] = useState(false)
+  const [userFormLoading, setUserFormLoading] = useState(false)
+  const [userForm, setUserForm] = useState({ full_name: "", email: "", phone: "", password: "" })
+
   useEffect(() => {
     fetchPriceConfigs()
     fetchAppSettings()
+    fetchAccounts()
   }, [])
+
+  const fetchAccounts = async () => {
+    setAccountsLoading(true)
+    try {
+      const data = await apiGet<typeof accounts>("/users")
+      setAccounts(data)
+    } catch {
+      // ignore
+    } finally {
+      setAccountsLoading(false)
+    }
+  }
+
+  const handleCreateUser = async () => {
+    if (!userForm.full_name || !userForm.email || !userForm.password) {
+      toast({ title: "Lỗi", description: "Vui lòng điền đầy đủ thông tin bắt buộc", variant: "destructive" })
+      return
+    }
+    if (userForm.password.length < 8) {
+      toast({ title: "Lỗi", description: "Mật khẩu phải có ít nhất 8 ký tự", variant: "destructive" })
+      return
+    }
+    setUserFormLoading(true)
+    try {
+      await apiPost("/users", {
+        full_name: userForm.full_name,
+        email: userForm.email,
+        phone: userForm.phone || null,
+        password: userForm.password,
+      })
+      toast({ title: "Tạo thành công", description: `Tài khoản ${userForm.email} đã được tạo`, variant: "success" })
+      setShowUserDialog(false)
+      setUserForm({ full_name: "", email: "", phone: "", password: "" })
+      fetchAccounts()
+    } catch (error) {
+      toast({ title: "Lỗi", description: error instanceof Error ? error.message : "Không thể tạo tài khoản", variant: "destructive" })
+    } finally {
+      setUserFormLoading(false)
+    }
+  }
+
+  const handleToggleActive = async (userId: number, isActive: boolean) => {
+    try {
+      await apiPatch(`/users/${userId}/toggle-active`, {})
+      toast({ title: isActive ? "Đã khóa tài khoản" : "Đã mở khóa tài khoản", variant: "success" })
+      fetchAccounts()
+    } catch (error) {
+      toast({ title: "Lỗi", description: error instanceof Error ? error.message : "Không thể thực hiện", variant: "destructive" })
+    }
+  }
 
   const fetchAppSettings = async () => {
     try {
@@ -874,6 +938,130 @@ export default function SettingsPage() {
             </Button>
             <Button onClick={handleSave}>
               {editingConfig ? "Cập nhật" : "Tạo mới"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Account management */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Users className="h-5 w-5" />
+                Quản lý tài khoản
+              </CardTitle>
+              <CardDescription>
+                Tạo và quản lý tài khoản quản trị viên
+              </CardDescription>
+            </div>
+            <Button onClick={() => setShowUserDialog(true)}>
+              <UserPlus className="mr-2 h-4 w-4" />
+              Tạo tài khoản
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {accountsLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+            </div>
+          ) : accounts.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-10 text-center">
+              <Users className="mb-3 h-10 w-10 text-muted-foreground/50" />
+              <p className="text-sm text-muted-foreground">Chưa có tài khoản nào</p>
+            </div>
+          ) : (
+            <div className="divide-y">
+              {accounts.map((acc) => (
+                <div key={acc.id} className="flex items-center justify-between py-3">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{acc.full_name}</span>
+                      {acc.id === currentUser?.id && (
+                        <Badge variant="secondary" className="text-xs">Bạn</Badge>
+                      )}
+                      <Badge variant={acc.is_active ? "success" : "outline"} className="text-xs">
+                        {acc.is_active ? "Hoạt động" : "Đã khóa"}
+                      </Badge>
+                    </div>
+                    <p className="text-sm text-muted-foreground">{acc.email}</p>
+                  </div>
+                  {acc.id !== currentUser?.id && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className={acc.is_active ? "text-red-500 hover:text-red-600" : "text-green-600 hover:text-green-700"}
+                      onClick={() => handleToggleActive(acc.id, acc.is_active)}
+                    >
+                      {acc.is_active ? (
+                        <><ShieldOff className="mr-1 h-4 w-4" />Khóa</>
+                      ) : (
+                        <><ShieldCheck className="mr-1 h-4 w-4" />Mở khóa</>
+                      )}
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Create user dialog */}
+      <Dialog open={showUserDialog} onOpenChange={setShowUserDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Tạo tài khoản mới</DialogTitle>
+            <DialogDescription>Tạo tài khoản quản trị viên mới cho hệ thống</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>Họ và tên <span className="text-destructive">*</span></Label>
+              <Input
+                placeholder="Nguyễn Văn A"
+                value={userForm.full_name}
+                onChange={(e) => setUserForm((f) => ({ ...f, full_name: e.target.value }))}
+                disabled={userFormLoading}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Email <span className="text-destructive">*</span></Label>
+              <Input
+                type="email"
+                placeholder="admin@example.com"
+                value={userForm.email}
+                onChange={(e) => setUserForm((f) => ({ ...f, email: e.target.value }))}
+                disabled={userFormLoading}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Số điện thoại</Label>
+              <Input
+                type="tel"
+                placeholder="0901234567"
+                value={userForm.phone}
+                onChange={(e) => setUserForm((f) => ({ ...f, phone: e.target.value }))}
+                disabled={userFormLoading}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Mật khẩu <span className="text-destructive">*</span></Label>
+              <Input
+                type="password"
+                placeholder="Ít nhất 8 ký tự"
+                value={userForm.password}
+                onChange={(e) => setUserForm((f) => ({ ...f, password: e.target.value }))}
+                disabled={userFormLoading}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowUserDialog(false)} disabled={userFormLoading}>Hủy</Button>
+            <Button onClick={handleCreateUser} disabled={userFormLoading}>
+              {userFormLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UserPlus className="mr-2 h-4 w-4" />}
+              Tạo tài khoản
             </Button>
           </DialogFooter>
         </DialogContent>
