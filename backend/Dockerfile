@@ -8,11 +8,10 @@ FROM python:3.11-slim-bookworm AS builder
 
 WORKDIR /app
 
-# [OPT-1] --mount=type=cache cho apt:
+# --mount=type=cache cho apt:
 #   /var/cache/apt  → file .deb (~50MB) được cache NGOÀI layer, không commit vào image
 #   /var/lib/apt    → package index (~8MB) cũng nằm ngoài layer
 #   sharing=locked  → tránh race condition khi build song song
-# → Không cần "rm -rf /var/lib/apt/lists/*" vì lists đã nằm ngoài layer
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -23,40 +22,46 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libffi-dev \
     libssl-dev
 
-# Copy uv binary từ image chính thức (project đã dùng uv — có uv.lock)
+# Copy uv binary từ image chính thức
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy manifest trước để tận dụng Docker layer cache:
-# deps chỉ rebuild khi pyproject.toml hoặc uv.lock thay đổi
+# Copy manifest trước để tận dụng Docker layer cache
 COPY pyproject.toml uv.lock ./
 
-# [OPT-2] --mount=type=cache cho uv download cache:
-#   Lần build đầu: uv download wheels bình thường (~200MB bandwidth)
-#   Lần rebuild:   uv đọc từ cache host → nhanh hơn ~5x, không cần internet
-#   Cache KHÔNG được commit vào image → final image không bị phình
+# --mount=type=cache cho uv: wheel cache nằm ngoài layer → không commit vào image
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
-# [OPT-3] Xóa các file không cần thiết ở runtime TRƯỚC KHI copy sang stage 2:
+# =============================================================
+# Aggressive cleanup TRƯỚC KHI copy sang runtime stage:
 #
-#   __pycache__/  → Python tự tạo lại khi import lần đầu → an toàn xóa
-#                    Tiết kiệm ~10–20MB
-#
-#   *.pyi         → Type stubs cho IDE/mypy, không cần khi chạy production
-#                    Tiết kiệm ~10–15MB (pydantic, sqlalchemy, google-genai đều ship .pyi)
-#
-#   tests/ test/  → Test suites của third-party packages (Pillow, cryptography...)
-#                    Không bao giờ chạy trong container → xóa an toàn
-#                    Tiết kiệm ~15–25MB
-#
-#   RECORD        → File inventory của pip/uv, chỉ cần khi uninstall package
-#                    Tiết kiệm ~2–3MB
-#
-RUN find /app/.venv -type d -name "__pycache__" -print0 | xargs -0 rm -rf; \
+#   __pycache__   → Python tự tạo lại khi import → an toàn xóa     (~10–20 MB)
+#   *.pyi         → Type stubs cho IDE/mypy, không cần production   (~10–15 MB)
+#   tests/ test/  → Test suites của third-party packages            (~15–25 MB)
+#   *.dist-info/  → pip/uv metadata, không cần sau khi install      (~  1–2 MB)
+#   docs/ examples/ → Tài liệu & ví dụ trong packages               (~  3–5 MB)
+#   share/        → Font data assets (fontTools), không dùng server (~  5–8 MB)
+#   *.txt *.rst   → Documentation text files trong packages         (~  2–4 MB)
+# =============================================================
+RUN \
+    # Remove compiled Python cache
+    find /app/.venv -type d -name "__pycache__" -print0 | xargs -0 rm -rf; \
+    # Remove type stubs (IDE only)
     find /app/.venv -name "*.pyi" -delete; \
-    find /app/.venv -type d -name "tests" -print0 | xargs -0 rm -rf 2>/dev/null; \
-    find /app/.venv -type d -name "test" -print0 | xargs -0 rm -rf 2>/dev/null; \
-    find /app/.venv -path "*dist-info/RECORD" -delete; \
+    # Remove test suites from third-party packages
+    find /app/.venv -type d \( -name "tests" -o -name "test" \) -print0 \
+        | xargs -0 rm -rf 2>/dev/null; \
+    # Remove entire dist-info directories (pip metadata, not needed at runtime)
+    find /app/.venv -maxdepth 5 -type d -name "*.dist-info" -print0 \
+        | xargs -0 rm -rf 2>/dev/null; \
+    # Remove documentation directories from packages
+    find /app/.venv -maxdepth 6 -type d \( -name "docs" -o -name "doc" -o -name "examples" -o -name "example" \) \
+        -print0 | xargs -0 rm -rf 2>/dev/null; \
+    # Remove share/ directory (fontTools font data, locale files, etc.)
+    rm -rf /app/.venv/share; \
+    # Remove documentation text files from packages (keep only code)
+    find /app/.venv -name "*.txt" -not -name "requirements*.txt" -delete 2>/dev/null; \
+    find /app/.venv -name "*.rst" -delete 2>/dev/null; \
     true
 
 
@@ -67,9 +72,7 @@ FROM python:3.11-slim-bookworm AS runtime
 
 WORKDIR /app
 
-# [OPT-1] Dùng cache mount cho runtime apt:
-#   Runtime chỉ cần shared libs (~1–2MB .deb)
-#   Nhưng package index (~8MB) sẽ nằm ngoài layer thay vì phải rm -rf sau
+# Runtime chỉ cần shared libs (không cần -dev headers)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -79,8 +82,25 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libffi8 \
     libssl3
 
+# Strip Python stdlib modules không bao giờ cần trong server context:
+#
+#   idlelib    → Python IDLE GUI editor                 (~2 MB)
+#   ensurepip  → Bootstrapper để cài pip               (~4 MB)
+#   lib2to3    → Python 2→3 migration tool             (~1 MB)
+#   turtle     → Turtle graphics (requires display)    (~0.5 MB)
+#   turtledemo → Turtle demo programs                  (~0.5 MB)
+#   tkinter    → GUI toolkit (absent in slim, safe)    (~0 MB)
+#
+# Các module này an toàn xóa vì không có server application nào cần chúng.
+# Python sẽ báo ImportError nếu code cố import — nhưng app không làm vậy.
+RUN find /usr/local/lib/python3.11 -maxdepth 1 -type d \
+        \( -name "idlelib" -o -name "ensurepip" \
+        -o -name "lib2to3" -o -name "turtledemo" \) \
+        -exec rm -rf {} + 2>/dev/null; \
+    find /usr/local/lib/python3.11 -maxdepth 1 -name "turtle.py" -delete 2>/dev/null; \
+    true
+
 # Copy .venv đã được làm sạch từ builder
-# Kết quả: chỉ có Python source + compiled extensions, không có stubs/tests/cache
 COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
@@ -89,7 +109,7 @@ COPY app/ ./app/
 COPY alembic/ ./alembic/
 COPY alembic.ini ./
 
-# Mount volume vào đây ở runtime để persist data
+# Persist data và uploads qua Docker volume
 RUN mkdir -p /app/data /app/uploads
 
 # Non-root user — giảm attack surface
