@@ -18,6 +18,7 @@ interface AuthState {
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
   loadFromStorage: () => Promise<void>;
+  setAuth: (token: string, user: User) => void;
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -70,6 +71,10 @@ export const useAuthStore = create<AuthState>((set) => ({
       });
       throw error;
     }
+  },
+
+  setAuth: (token: string, user: User) => {
+    set({ user, token, isAuthenticated: true, isLoading: false, error: null });
   },
 
   logout: () => {

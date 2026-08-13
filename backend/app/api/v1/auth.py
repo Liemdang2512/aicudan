@@ -8,10 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
-from app.core.security import create_access_token, verify_password
+from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.user import LoginRequest, LoginResponse, UserResponse
+from app.schemas.user import LoginRequest, LoginResponse, RegisterRequest, UserResponse
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -100,6 +100,31 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
         access_token=access_token,
         user=UserResponse.model_validate(user),
     )
+
+
+@router.post("/register", response_model=LoginResponse, status_code=status.HTTP_201_CREATED)
+async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    if len(body.password) < 8:
+        raise HTTPException(status_code=422, detail="Mật khẩu phải có ít nhất 8 ký tự")
+
+    existing = await db.execute(select(User).where(User.email == body.email.strip().lower()))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Email đã được sử dụng")
+
+    user = User(
+        email=body.email.strip().lower(),
+        password_hash=hash_password(body.password),
+        full_name=body.full_name.strip(),
+        phone=body.phone,
+        role="admin",
+        is_active=True,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    access_token = create_access_token({"user_id": user.id, "email": user.email, "role": user.role})
+    return LoginResponse(access_token=access_token, user=UserResponse.model_validate(user))
 
 
 @router.get("/me", response_model=UserResponse)

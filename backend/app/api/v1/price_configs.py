@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
+from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.price_config import PriceConfig
 from app.models.user import User
@@ -19,10 +19,12 @@ router = APIRouter(prefix="/price-configs", tags=["Price Configs"])
 @router.get("", response_model=list[PriceConfigResponse])
 async def list_price_configs(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(PriceConfig).where(PriceConfig.is_active == True).order_by(PriceConfig.is_default.desc())
+        select(PriceConfig)
+        .where(PriceConfig.is_active == True, PriceConfig.owner_id == current_user.id)  # noqa: E712
+        .order_by(PriceConfig.is_default.desc())
     )
     configs = result.scalars().all()
     return [PriceConfigResponse.model_validate(c) for c in configs]
@@ -32,15 +34,20 @@ async def list_price_configs(
 async def create_price_config(
     body: PriceConfigCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(get_current_user),
 ):
-    # If this is default, unset other defaults
+    # If this is default, unset other defaults for this user
     if body.is_default:
-        result = await db.execute(select(PriceConfig).where(PriceConfig.is_default == True))
+        result = await db.execute(
+            select(PriceConfig).where(
+                PriceConfig.is_default == True,  # noqa: E712
+                PriceConfig.owner_id == current_user.id,
+            )
+        )
         for config in result.scalars().all():
             config.is_default = False
 
-    config = PriceConfig(**body.model_dump())
+    config = PriceConfig(owner_id=current_user.id, **body.model_dump())
     db.add(config)
     await db.commit()
     await db.refresh(config)
@@ -52,9 +59,11 @@ async def update_price_config(
     config_id: int,
     body: PriceConfigUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(PriceConfig).where(PriceConfig.id == config_id))
+    result = await db.execute(
+        select(PriceConfig).where(PriceConfig.id == config_id, PriceConfig.owner_id == current_user.id)
+    )
     config = result.scalar_one_or_none()
     if not config:
         raise HTTPException(status_code=404, detail="Bảng giá không tồn tại")
@@ -71,7 +80,12 @@ async def update_price_config(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if update_data.get("is_default"):
-        others = await db.execute(select(PriceConfig).where(PriceConfig.is_default == True))
+        others = await db.execute(
+            select(PriceConfig).where(
+                PriceConfig.is_default == True,  # noqa: E712
+                PriceConfig.owner_id == current_user.id,
+            )
+        )
         for c in others.scalars().all():
             c.is_default = False
 
@@ -87,9 +101,11 @@ async def update_price_config(
 async def delete_price_config(
     config_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(PriceConfig).where(PriceConfig.id == config_id))
+    result = await db.execute(
+        select(PriceConfig).where(PriceConfig.id == config_id, PriceConfig.owner_id == current_user.id)
+    )
     config = result.scalar_one_or_none()
     if not config:
         raise HTTPException(status_code=404, detail="Bảng giá không tồn tại")
