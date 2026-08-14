@@ -186,6 +186,12 @@ async def process_batch_images(job_id: str, image_paths: list[dict], building_id
             _store_job_data(job, job_data)
             await db.commit()
 
+            # Fetch all rooms once before the loop — avoids N queries per image
+            all_rooms_res = await db.execute(
+                select(Room).where(Room.building_id == building_id, Room.is_active == True)
+            )
+            building_rooms = all_rooms_res.scalars().all()
+
             for i, item in enumerate(image_paths):
                 file_path = item["path"]
                 room_hint = item.get("room_number")
@@ -199,11 +205,6 @@ async def process_batch_images(job_id: str, image_paths: list[dict], building_id
                     ai_room_number = ai_result.get("room_number")
                     meter_type = ai_result.get("meter_type") or "unknown"
 
-                    # Fetch all rooms in this building for smart matching
-                    all_rooms_res = await db.execute(
-                        select(Room).where(Room.building_id == building_id, Room.is_active == True)
-                    )
-                    building_rooms = all_rooms_res.scalars().all()
                     matched_room = _match_unique_room(
                         building_rooms,
                         room_hint,
@@ -417,10 +418,17 @@ async def batch_status(
     )
     readings = readings_result.scalars().all()
 
+    # Pre-fetch all rooms in a single IN query — avoids N room queries in loop
+    room_ids = [r.room_id for r in readings if r.room_id is not None]
+    if room_ids:
+        rooms_res = await db.execute(select(Room).where(Room.id.in_(room_ids)))
+        room_map = {room.id: room for room in rooms_res.scalars().all()}
+    else:
+        room_map = {}
+
     reading_responses = []
     for r in readings:
-        room_result = await db.execute(select(Room).where(Room.id == r.room_id))
-        room = room_result.scalar_one_or_none()
+        room = room_map.get(r.room_id) if r.room_id is not None else None
         resp = ReadingResponse.model_validate(r)
         if room:
             resp.room_number = room.room_number
@@ -481,6 +489,18 @@ async def get_staged_reading_image(
         building_id = job_data.get("building_id")
         if type(building_id) is not int:
             continue
+
+        # Ownership check FIRST — skip jobs for buildings not owned by current user
+        # This prevents data leak: we never scan unmatched items for other users' jobs
+        building_result = await db.execute(
+            select(Building.id).where(
+                Building.id == building_id,
+                Building.owner_id == current_user.id,
+            )
+        )
+        if building_result.scalar_one_or_none() is None:
+            continue
+
         staged = next(
             (
                 item
@@ -492,14 +512,6 @@ async def get_staged_reading_image(
         if staged is None:
             continue
 
-        building_result = await db.execute(
-            select(Building.id).where(
-                Building.id == building_id,
-                Building.owner_id == current_user.id,
-            )
-        )
-        if building_result.scalar_one_or_none() is None:
-            raise HTTPException(status_code=404, detail="Ảnh không tồn tại")
         return FileResponse(_resolve_upload_file(staged.get("image_path")))
 
     raise HTTPException(status_code=404, detail="Ảnh không tồn tại")
@@ -517,6 +529,21 @@ async def approve_staged_reading(
     )
     for job in jobs_result.scalars().all():
         job_data = _load_job_data(job)
+        building_id = job_data.get("building_id")
+
+        # Ownership check FIRST — skip jobs for buildings not owned by current user
+        # Prevents accepting staged readings from another user's jobs
+        if type(building_id) is not int:
+            continue
+        bld_check = await db.execute(
+            select(Building.id).where(
+                Building.id == building_id,
+                Building.owner_id == current_user.id,
+            )
+        )
+        if bld_check.scalar_one_or_none() is None:
+            continue
+
         staged_items = job_data.get("unmatched", [])
         staged = next(
             (item for item in staged_items if item.get("staged_id") == staged_id),
@@ -525,7 +552,6 @@ async def approve_staged_reading(
         if staged is None:
             continue
 
-        building_id = job_data.get("building_id")
         room_result = await db.execute(
             select(Room)
             .join(Building, Building.id == Room.building_id)
