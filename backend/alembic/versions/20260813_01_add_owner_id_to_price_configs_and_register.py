@@ -20,7 +20,11 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     # Add owner_id to price_configs (nullable for backward compat with existing rows)
     # SQLite does not support ADD CONSTRAINT via ALTER — FK enforced at application level
-    op.add_column("price_configs", sa.Column("owner_id", sa.Integer(), nullable=True))
+    # Idempotent: skip if column already exists (e.g. partial previous run)
+    conn = op.get_bind()
+    cols = [row[1] for row in conn.execute(sa.text("PRAGMA table_info(price_configs)")).fetchall()]
+    if "owner_id" not in cols:
+        op.add_column("price_configs", sa.Column("owner_id", sa.Integer(), nullable=True))
 
 
 def downgrade() -> None:
