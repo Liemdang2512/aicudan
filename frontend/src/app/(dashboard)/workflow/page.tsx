@@ -1088,6 +1088,7 @@ export default function WorkflowPage() {
 
       {/* STEP 3: GENERATE & VIEW INVOICES */}
       {currentStep === 3 && (
+        <React.Suspense fallback={<div className="h-32 animate-pulse bg-muted rounded-lg" />}>
         <Card className="border-primary/20 shadow-sm">
           <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
@@ -1154,10 +1155,12 @@ export default function WorkflowPage() {
             </div>
           </CardContent>
         </Card>
+        </React.Suspense>
       )}
 
       {/* STEP 4: TELEGRAM NOTIFICATIONS */}
       {currentStep === 4 && (
+        <React.Suspense fallback={<div className="h-32 animate-pulse bg-muted rounded-lg" />}>
         <Card className="border-primary/20 shadow-sm">
           <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
@@ -1275,6 +1278,7 @@ export default function WorkflowPage() {
             </div>
           </CardContent>
         </Card>
+        </React.Suspense>
       )}
 
       {/* Edit Single Reading Dialog */}
