@@ -95,7 +95,15 @@ async def send_telegram_message(chat_id: str, text: str, photo_path: str | None 
                         json={"chat_id": chat_id, "text": text},
                 )
             data = r.json()
-            return bool(data.get("ok"))
+            if data.get("ok"):
+                return True
+            logger.warning(
+                "Telegram API returned not-ok for chat_id=%s: error_code=%s description=%s",
+                chat_id,
+                data.get("error_code"),
+                data.get("description"),
+            )
+            return False
     except Exception:
-        logger.error("Telegram message delivery failed")
+        logger.error("Telegram message delivery failed for chat_id=%s", chat_id, exc_info=True)
         return False

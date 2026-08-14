@@ -40,6 +40,47 @@ async def _stamp_alembic_if_fresh() -> None:
         logger.warning("Could not stamp alembic version: %s", exc)
 
 
+async def _hydrate_settings_from_db() -> None:
+    """Nạp cài đặt từ app_settings DB vào settings in-memory.
+
+    Đảm bảo sau container restart, notification_service và các service khác
+    dùng token đã được cập nhật qua UI thay vì token cũ trong .env.
+    """
+    import os
+
+    try:
+        from sqlalchemy import select
+
+        from app.models.app_setting import AppSetting
+
+        async with async_session() as db:
+            result = await db.execute(select(AppSetting).where(AppSetting.id == 1))
+            row = result.scalar_one_or_none()
+            if row is None:
+                return
+
+            field_map = {
+                "gemini_api_key": ("GEMINI_API_KEY", "GEMINI_API_KEY"),
+                "telegram_bot_token": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
+                "telegram_ktv_bot_token": ("TELEGRAM_KTV_BOT_TOKEN", "TELEGRAM_KTV_BOT_TOKEN"),
+                "telegram_ktv_password": ("TELEGRAM_KTV_PASSWORD", "TELEGRAM_KTV_PASSWORD"),
+                "manager_telegram_chat_id": ("MANAGER_TELEGRAM_CHAT_ID", "MANAGER_TELEGRAM_CHAT_ID"),
+                "payment_management_unit": ("PAYMENT_MANAGEMENT_UNIT", "PAYMENT_MANAGEMENT_UNIT"),
+                "payment_bank_account": ("PAYMENT_BANK_ACCOUNT", "PAYMENT_BANK_ACCOUNT"),
+                "payment_bank_name": ("PAYMENT_BANK_NAME", "PAYMENT_BANK_NAME"),
+                "payment_account_holder": ("PAYMENT_ACCOUNT_HOLDER", "PAYMENT_ACCOUNT_HOLDER"),
+            }
+            for db_attr, (settings_attr, env_key) in field_map.items():
+                value = getattr(row, db_attr, None)
+                if value:
+                    setattr(settings, settings_attr, value)
+                    os.environ[env_key] = value
+
+            logger.info("Settings hydrated from app_settings DB")
+    except Exception as exc:
+        logger.warning("Could not hydrate settings from DB: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -47,6 +88,7 @@ async def lifespan(app: FastAPI):
     await _stamp_alembic_if_fresh()
     async with async_session() as db:
         await seed_data(db)
+    await _hydrate_settings_from_db()
     yield
     # Shutdown
 
