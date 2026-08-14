@@ -472,7 +472,10 @@ async def get_reading_image(
     reading = result.scalar_one_or_none()
     if not reading:
         raise HTTPException(status_code=404, detail="Ảnh không tồn tại")
-    return FileResponse(_resolve_upload_file(reading.image_path))
+    return FileResponse(
+        _resolve_upload_file(reading.image_path),
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @router.get("/staged/{staged_id}/image")

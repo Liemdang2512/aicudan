@@ -4,7 +4,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -113,40 +113,72 @@ async def generate_invoices(
     room_results: list[InvoiceGenerateRoomResult] = []
     total_amount = 0.0
 
-    for room in rooms:
-        # Check if invoice already exists
-        existing = await db.execute(
-            select(Invoice).where(
-                Invoice.room_id == room.id,
-                Invoice.invoice_month == body.invoice_month,
-            )
+    room_ids = [r.id for r in rooms]
+
+    # Batch pre-fetch 1: existing invoices — avoids N Invoice queries in loop
+    existing_invoices_res = await db.execute(
+        select(Invoice.room_id, Invoice.id).where(
+            Invoice.room_id.in_(room_ids),
+            Invoice.invoice_month == body.invoice_month,
         )
-        existing_invoice = existing.scalar_one_or_none()
-        if existing_invoice:
+    )
+    existing_invoice_map: dict[int, int] = {
+        row.room_id: row.id for row in existing_invoices_res
+    }
+
+    # Batch pre-fetch 2: current readings (approved, in month) — avoids N current queries
+    # Fetch all, sort and deduplicate in Python (SQLite lacks DISTINCT ON)
+    current_readings_res = await db.execute(
+        select(MeterReading)
+        .where(
+            MeterReading.room_id.in_(room_ids),
+            MeterReading.status == "approved",
+            MeterReading.reading_date >= month_start,
+            MeterReading.reading_date < next_month,
+        )
+        .order_by(MeterReading.reading_date.desc(), MeterReading.id.desc())
+    )
+    current_reading_map: dict[int, MeterReading] = {}
+    for mr in current_readings_res.scalars().all():
+        if mr.room_id not in current_reading_map:
+            current_reading_map[mr.room_id] = mr
+
+    # Batch pre-fetch 3: previous readings — only for rooms that have a current reading
+    rooms_with_current = list(current_reading_map.keys())
+    if rooms_with_current:
+        prev_readings_res = await db.execute(
+            select(MeterReading)
+            .where(
+                MeterReading.room_id.in_(rooms_with_current),
+                MeterReading.status == "approved",
+                MeterReading.reading_date < month_start,
+            )
+            .order_by(MeterReading.reading_date.desc(), MeterReading.id.desc())
+        )
+        prev_reading_map: dict[int, MeterReading] = {}
+        for mr in prev_readings_res.scalars().all():
+            if mr.room_id not in prev_reading_map:
+                prev_reading_map[mr.room_id] = mr
+    else:
+        prev_reading_map = {}
+
+    for room in rooms:
+        # Check if invoice already exists (from pre-fetched map)
+        existing_invoice_id = existing_invoice_map.get(room.id)
+        if existing_invoice_id is not None:
             room_results.append(
                 InvoiceGenerateRoomResult(
                     room_id=room.id,
                     room_number=room.room_number,
                     status="skipped",
-                    invoice_id=existing_invoice.id,
+                    invoice_id=existing_invoice_id,
                     detail="Hóa đơn tháng này đã tồn tại",
                 )
             )
             continue
 
-        # Get latest approved reading for this month
-        current_result = await db.execute(
-            select(MeterReading)
-            .where(
-                MeterReading.room_id == room.id,
-                MeterReading.status == "approved",
-                MeterReading.reading_date >= month_start,
-                MeterReading.reading_date < next_month,
-            )
-            .order_by(MeterReading.reading_date.desc(), MeterReading.id.desc())
-            .limit(1)
-        )
-        current_reading_obj = current_result.scalar_one_or_none()
+        # Get latest approved reading for this month (from pre-fetched map)
+        current_reading_obj = current_reading_map.get(room.id)
         if not current_reading_obj:
             room_results.append(
                 InvoiceGenerateRoomResult(
@@ -158,24 +190,8 @@ async def generate_invoices(
             )
             continue
 
-        # Get previous reading
-        prev_result = await db.execute(
-            select(MeterReading)
-            .where(
-                MeterReading.room_id == room.id,
-                MeterReading.status == "approved",
-                or_(
-                    MeterReading.reading_date < current_reading_obj.reading_date,
-                    and_(
-                        MeterReading.reading_date == current_reading_obj.reading_date,
-                        MeterReading.id < current_reading_obj.id,
-                    ),
-                ),
-            )
-            .order_by(MeterReading.reading_date.desc(), MeterReading.id.desc())
-            .limit(1)
-        )
-        prev_reading_obj = prev_result.scalar_one_or_none()
+        # Get previous reading (from pre-fetched map)
+        prev_reading_obj = prev_reading_map.get(room.id)
         previous_value = prev_reading_obj.meter_value if prev_reading_obj else room.initial_reading
 
         current_value = current_reading_obj.meter_value
