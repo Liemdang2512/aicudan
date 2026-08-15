@@ -55,7 +55,7 @@ import type {
 const NOTIFICATION_POLL_INTERVAL_MS = 1000
 const NOTIFICATION_POLL_TIMEOUT_MS = 60_000
 const BATCH_POLL_INTERVAL_MS = 2000
-const BATCH_POLL_TIMEOUT_MS = 90_000
+const BATCH_POLL_TIMEOUT_MS = 300_000
 const INVOICE_LIST_LIMIT = 200
 
 const waitForNextPoll = (delay: number, signal: AbortSignal) =>

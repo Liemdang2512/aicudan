@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -172,8 +173,41 @@ async def _save_upload_limited(upload: UploadFile, destination: Path) -> bool:
     return total_size > 0
 
 
+BATCH_MAX_CONCURRENT = 20
+
+
+async def _process_single_image_ai(
+    item: dict,
+    building_rooms: list,
+    semaphore: asyncio.Semaphore,
+) -> dict:
+    """Gọi Gemini AI cho 1 ảnh, trả về dict kết quả. Giới hạn concurrency bằng semaphore."""
+    async with semaphore:
+        file_path = item["path"]
+        room_hint = item.get("room_number")
+        try:
+            ai_result = await ai_service.extract_meter_reading(file_path)
+            meter_value = ai_result.get("meter_reading")
+            confidence = ai_result.get("confidence", 0.0)
+            ai_room_number = ai_result.get("room_number")
+            meter_type = ai_result.get("meter_type") or "unknown"
+            matched_room = _match_unique_room(building_rooms, room_hint, ai_room_number)
+            return {
+                "success": True,
+                "file_path": file_path,
+                "meter_value": meter_value,
+                "confidence": confidence,
+                "meter_type": meter_type,
+                "matched_room": matched_room,
+                "notes": ai_result.get("notes", ""),
+            }
+        except Exception as e:
+            logger.exception("Error processing uploaded image %s: %s", file_path, e)
+            return {"success": False, "file_path": file_path}
+
+
 async def process_batch_images(job_id: str, image_paths: list[dict], building_id: int, reading_date: str):
-    """Background task: process batch images with AI"""
+    """Background task: process batch images with AI — song song tối đa BATCH_MAX_CONCURRENT ảnh."""
     async with async_session() as db:
         try:
             # Update job status
@@ -186,84 +220,77 @@ async def process_batch_images(job_id: str, image_paths: list[dict], building_id
             _store_job_data(job, job_data)
             await db.commit()
 
-            # Fetch all rooms once before the loop — avoids N queries per image
+            # Fetch all rooms once
             all_rooms_res = await db.execute(
                 select(Room).where(Room.building_id == building_id, Room.is_active == True)
             )
             building_rooms = all_rooms_res.scalars().all()
 
-            for i, item in enumerate(image_paths):
-                file_path = item["path"]
-                room_hint = item.get("room_number")
+            # Gọi Gemini song song — giới hạn bởi số ảnh thực tế hoặc BATCH_MAX_CONCURRENT
+            concurrency = min(BATCH_MAX_CONCURRENT, len(image_paths))
+            semaphore = asyncio.Semaphore(concurrency)
+            ai_results = await asyncio.gather(
+                *[_process_single_image_ai(item, building_rooms, semaphore) for item in image_paths]
+            )
 
-                try:
-                    # AI processing
-                    ai_result = await ai_service.extract_meter_reading(file_path)
-
-                    meter_value = ai_result.get("meter_reading")
-                    confidence = ai_result.get("confidence", 0.0)
-                    ai_room_number = ai_result.get("room_number")
-                    meter_type = ai_result.get("meter_type") or "unknown"
-
-                    matched_room = _match_unique_room(
-                        building_rooms,
-                        room_hint,
-                        ai_room_number,
-                    )
-                    parsed_date = _parse_reading_date(reading_date)
-
-                    if matched_room and meter_type == "electric" and meter_value is not None:
-                        status = determine_status(confidence)
-                        notes = ai_result.get("notes", "")
-
-                        reading = MeterReading(
-                            room_id=matched_room.id,
-                            reading_date=parsed_date,
-                            meter_value=int(meter_value),
-                            image_path=file_path,
-                            confidence_score=confidence,
-                            status=status,
-                            notes=notes,
-                            batch_job_id=job_id,
-                        )
-                        db.add(reading)
-                    else:
-                        notes = ai_result.get("notes", "")
-                        if meter_value is None:
-                            confidence = 0.0
-                            job.failed_items += 1
-                            notes = f"Cần kiểm tra: {notes or 'AI không đọc được chỉ số'}"
-                        elif meter_type != "electric":
-                            type_note = (
-                                "Ảnh không phải đồng hồ điện"
-                                if meter_type == "water"
-                                else "Không xác định được loại đồng hồ"
-                            )
-                            notes = f"{type_note}. {notes}".strip()
-                        job_data = _load_job_data(job)
-                        job_data["unmatched"].append(
-                            {
-                                "staged_id": uuid.uuid4().hex,
-                                "reading_date": parsed_date.isoformat(),
-                                "meter_value": int(meter_value) if meter_value is not None else None,
-                                "meter_type": meter_type,
-                                "image_path": file_path,
-                                "confidence_score": confidence,
-                                "status": "needs_review",
-                                "notes": notes or "Không nhận diện được phòng; cần chọn phòng thủ công",
-                                "batch_job_id": job_id,
-                            }
-                        )
-                        _store_job_data(job, job_data)
-
-                    job.processed_items = i + 1
-                    await db.commit()
-
-                except Exception as e:
-                    logger.exception("Error processing uploaded image %s: %s", file_path, e)
+            # Ghi kết quả vào DB tuần tự
+            parsed_date = _parse_reading_date(reading_date)
+            for i, ai_res in enumerate(ai_results):
+                if not ai_res["success"]:
                     job.processed_items = i + 1
                     job.failed_items += 1
                     await db.commit()
+                    continue
+
+                meter_value = ai_res["meter_value"]
+                confidence = ai_res["confidence"]
+                meter_type = ai_res["meter_type"]
+                matched_room = ai_res["matched_room"]
+                notes = ai_res["notes"]
+                file_path = ai_res["file_path"]
+
+                if matched_room and meter_type == "electric" and meter_value is not None:
+                    reading = MeterReading(
+                        room_id=matched_room.id,
+                        reading_date=parsed_date,
+                        meter_value=int(meter_value),
+                        image_path=file_path,
+                        confidence_score=confidence,
+                        status=determine_status(confidence),
+                        notes=notes,
+                        batch_job_id=job_id,
+                    )
+                    db.add(reading)
+                else:
+                    if meter_value is None:
+                        confidence = 0.0
+                        job.failed_items += 1
+                        notes = f"Cần kiểm tra: {notes or 'AI không đọc được chỉ số'}"
+                    elif meter_type != "electric":
+                        type_note = (
+                            "Ảnh không phải đồng hồ điện"
+                            if meter_type == "water"
+                            else "Không xác định được loại đồng hồ"
+                        )
+                        notes = f"{type_note}. {notes}".strip()
+                    job_data = _load_job_data(job)
+                    job_data["unmatched"].append(
+                        {
+                            "staged_id": uuid.uuid4().hex,
+                            "reading_date": parsed_date.isoformat(),
+                            "meter_value": int(meter_value) if meter_value is not None else None,
+                            "meter_type": meter_type,
+                            "image_path": file_path,
+                            "confidence_score": confidence,
+                            "status": "needs_review",
+                            "notes": notes or "Không nhận diện được phòng; cần chọn phòng thủ công",
+                            "batch_job_id": job_id,
+                        }
+                    )
+                    _store_job_data(job, job_data)
+
+                job.processed_items = i + 1
+                await db.commit()
 
             # Mark job as completed
             job.status = "completed"

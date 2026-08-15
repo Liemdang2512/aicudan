@@ -82,7 +82,7 @@ class AIService:
             import asyncio
             response = await asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-2.5-flash",
+                model="gemini-3.5-flash",
                 contents=[METER_READING_PROMPT, img],
             )
             result_text = response.text.strip()
