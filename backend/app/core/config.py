@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     # Google Gemini
     GEMINI_API_KEY: str = ""
 
+    # Server public URL (dùng để tự đăng ký Telegram webhook khi khởi động)
+    SERVER_URL: str = ""
+
     # Telegram Bot
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_WEBHOOK_SECRET: str = ""

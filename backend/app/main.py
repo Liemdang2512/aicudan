@@ -81,6 +81,42 @@ async def _hydrate_settings_from_db() -> None:
         logger.warning("Could not hydrate settings from DB: %s", exc)
 
 
+async def _auto_register_webhooks() -> None:
+    """Tự động đăng ký Telegram webhook khi khởi động nếu SERVER_URL đã cấu hình."""
+    server_url = settings.SERVER_URL.rstrip("/")
+    if not server_url:
+        return
+
+    import httpx
+
+    async def _set_webhook(token: str, path: str, allowed_updates: list[str]) -> None:
+        url = f"https://api.telegram.org/bot{token}/setWebhook"
+        webhook_url = f"{server_url}{path}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.post(url, json={"url": webhook_url, "allowed_updates": allowed_updates})
+                data = r.json()
+                if data.get("ok"):
+                    logger.info("Telegram webhook đã đăng ký: %s", webhook_url)
+                else:
+                    logger.warning("Đăng ký webhook thất bại (%s): %s", webhook_url, data.get("description"))
+        except Exception as exc:
+            logger.warning("Không thể đăng ký Telegram webhook %s: %s", webhook_url, exc)
+
+    if settings.TELEGRAM_BOT_TOKEN:
+        await _set_webhook(
+            settings.TELEGRAM_BOT_TOKEN,
+            "/api/v1/telegram/webhook",
+            ["message"],
+        )
+    if settings.TELEGRAM_KTV_BOT_TOKEN:
+        await _set_webhook(
+            settings.TELEGRAM_KTV_BOT_TOKEN,
+            "/api/v1/telegram/ktv/webhook",
+            ["message", "callback_query"],
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -89,6 +125,7 @@ async def lifespan(app: FastAPI):
     async with async_session() as db:
         await seed_data(db)
     await _hydrate_settings_from_db()
+    await _auto_register_webhooks()
     yield
     # Shutdown
 
