@@ -107,7 +107,8 @@ export default function SettingsPage() {
   // Webhook setup state
   const [webhookServerUrl, setWebhookServerUrl] = useState(() => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || ""
-    return apiUrl.replace(/\/api\/v1\/?$/, "") || "https://aicudan.congsu.ai.vn"
+    const base = apiUrl.replace(/\/api\/v1\/?$/, "") || "https://aicudan.congsu.ai.vn"
+    return base.replace(/^http:\/\//, "https://")
   })
   const [managerWebhookRegistering, setManagerWebhookRegistering] = useState(false)
   const [ktvWebhookRegistering, setKtvWebhookRegistering] = useState(false)
