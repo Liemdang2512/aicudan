@@ -104,6 +104,14 @@ export default function SettingsPage() {
   const [managerChatId, setManagerChatId] = useState("")
   const [managerChatIdSaving, setManagerChatIdSaving] = useState(false)
 
+  // Webhook setup state
+  const [webhookServerUrl, setWebhookServerUrl] = useState(() => {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || ""
+    return apiUrl.replace(/\/api\/v1\/?$/, "") || "https://aicudan.congsu.ai.vn"
+  })
+  const [managerWebhookRegistering, setManagerWebhookRegistering] = useState(false)
+  const [ktvWebhookRegistering, setKtvWebhookRegistering] = useState(false)
+
   // Account management state
   const { user: currentUser } = useAuthStore()
   const [accounts, setAccounts] = useState<Array<{ id: number; email: string; full_name: string; phone: string | null; role: string; is_active: boolean; created_at: string }>>([])
@@ -313,6 +321,36 @@ export default function SettingsPage() {
       toast({ title: "Lỗi", description: error instanceof Error ? error.message : "Không thể lưu", variant: "destructive" })
     } finally {
       setManagerChatIdSaving(false)
+    }
+  }
+
+  const handleSetupManagerWebhook = async () => {
+    setManagerWebhookRegistering(true)
+    try {
+      const result = await apiPost<{ ok: boolean; webhook_url: string; description: string }>(
+        "/settings/setup-webhook",
+        { server_url: webhookServerUrl }
+      )
+      toast({ title: "✅ Webhook Bot Quản Lý đã đăng ký", description: result.webhook_url, variant: "success" })
+    } catch (error) {
+      toast({ title: "Lỗi đăng ký webhook", description: error instanceof Error ? error.message : "Thất bại", variant: "destructive" })
+    } finally {
+      setManagerWebhookRegistering(false)
+    }
+  }
+
+  const handleSetupKtvWebhook = async () => {
+    setKtvWebhookRegistering(true)
+    try {
+      const result = await apiPost<{ ok: boolean; webhook_url: string; description: string }>(
+        "/settings/setup-ktv-webhook",
+        { server_url: webhookServerUrl }
+      )
+      toast({ title: "✅ Webhook Bot KTV đã đăng ký", description: result.webhook_url, variant: "success" })
+    } catch (error) {
+      toast({ title: "Lỗi đăng ký webhook KTV", description: error instanceof Error ? error.message : "Thất bại", variant: "destructive" })
+    } finally {
+      setKtvWebhookRegistering(false)
     }
   }
 
@@ -830,6 +868,60 @@ export default function SettingsPage() {
               )}
               Lưu Manager Chat ID
             </Button>
+          </CardContent>
+        </Card>
+
+        {/* Webhook Setup */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Settings className="h-5 w-5" />
+              Đăng ký Webhook Telegram
+            </CardTitle>
+            <CardDescription>
+              Bắt buộc sau khi lưu token bot. Telegram cần biết địa chỉ server để gửi tin nhắn về.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>URL Server</Label>
+              <Input
+                value={webhookServerUrl}
+                onChange={(e) => setWebhookServerUrl(e.target.value)}
+                placeholder="https://aicudan.congsu.ai.vn"
+              />
+              <p className="text-xs text-muted-foreground">
+                Domain public của server (không có /api/v1). Telegram sẽ gửi tin nhắn về đây.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button
+                variant="outline"
+                disabled={managerWebhookRegistering || !webhookServerUrl}
+                onClick={handleSetupManagerWebhook}
+                className="flex-1"
+              >
+                {managerWebhookRegistering ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <MessageCircle className="mr-2 h-4 w-4" />
+                )}
+                Đăng ký Webhook Bot Quản Lý
+              </Button>
+              <Button
+                variant="outline"
+                disabled={ktvWebhookRegistering || !webhookServerUrl}
+                onClick={handleSetupKtvWebhook}
+                className="flex-1"
+              >
+                {ktvWebhookRegistering ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <MessageCircle className="mr-2 h-4 w-4" />
+                )}
+                Đăng ký Webhook Bot KTV
+              </Button>
+            </div>
           </CardContent>
         </Card>
       </div>
