@@ -294,7 +294,7 @@ async def process_batch_images(job_id: str, image_paths: list[dict], building_id
 
             # Mark job as completed
             job.status = "completed"
-            job.completed_at = datetime.now(timezone.utc)
+            job.completed_at = datetime.utcnow()
             await db.commit()
 
         except Exception as e:
