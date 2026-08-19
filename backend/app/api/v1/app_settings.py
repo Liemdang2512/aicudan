@@ -36,6 +36,9 @@ class AppSettingsResponse(BaseModel):
     telegram_ktv_password_set: bool
     manager_telegram_chat_id: str
     runtime_sync_notice: str = RUNTIME_SYNC_NOTICE
+    ktv_webhook_ok: bool | None = None
+    ktv_webhook_url: str | None = None
+    ktv_webhook_message: str | None = None
 
 
 class UpdateSettingsRequest(BaseModel):
@@ -218,7 +221,29 @@ async def update_settings(
     if any(credential is not None for credential in credentials.values()):
         logger.info("Provider credentials updated in database")
 
-    return _setting_to_response(row)
+    response = _setting_to_response(row)
+
+    # Tự động đăng ký KTV webhook ngay khi token được cập nhật
+    if data.telegram_ktv_bot_token and settings.SERVER_URL:
+        server_url = settings.SERVER_URL.rstrip("/")
+        webhook_url = f"{server_url}/api/v1/telegram/ktv/webhook/{current_user.id}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.post(
+                    f"https://api.telegram.org/bot{data.telegram_ktv_bot_token}/setWebhook",
+                    json={"url": webhook_url, "allowed_updates": ["message", "callback_query"]},
+                )
+                result = r.json()
+                response.ktv_webhook_ok = result.get("ok", False)
+                response.ktv_webhook_url = webhook_url
+                response.ktv_webhook_message = result.get("description", "")
+                logger.info("KTV webhook auto-registered: ok=%s url=%s", response.ktv_webhook_ok, webhook_url)
+        except Exception as exc:
+            response.ktv_webhook_ok = False
+            response.ktv_webhook_message = str(exc)
+            logger.warning("Không thể tự đăng ký KTV webhook: %s", exc)
+
+    return response
 
 
 class SetupWebhookRequest(BaseModel):

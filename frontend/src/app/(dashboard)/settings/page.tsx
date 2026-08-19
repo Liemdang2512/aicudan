@@ -292,8 +292,31 @@ export default function SettingsPage() {
         toast({ title: "Không có thay đổi", description: "Nhập token hoặc mật khẩu mới", variant: "destructive" })
         return
       }
-      await apiPatch("/settings", payload)
-      toast({ title: "Lưu thành công", description: "Cài đặt Bot KTV đã được cập nhật", variant: "success" })
+      const result = await apiPatch<{
+        ktv_webhook_ok?: boolean
+        ktv_webhook_url?: string
+        ktv_webhook_message?: string
+      }>("/settings", payload)
+
+      if (ktvBotToken && result.ktv_webhook_ok !== undefined) {
+        // Token mới → hiện trạng thái webhook
+        if (result.ktv_webhook_ok) {
+          toast({
+            title: "✅ Bot KTV đã sẵn sàng",
+            description: `Webhook đăng ký thành công: ${result.ktv_webhook_url}`,
+            variant: "success",
+          })
+        } else {
+          toast({
+            title: "⚠️ Lưu thành công nhưng webhook thất bại",
+            description: result.ktv_webhook_message || "Không thể đăng ký webhook. Kiểm tra lại SERVER_URL.",
+            variant: "destructive",
+          })
+        }
+      } else {
+        toast({ title: "Lưu thành công", description: "Cài đặt Bot KTV đã được cập nhật", variant: "success" })
+      }
+
       setKtvBotToken("")
       setKtvPassword("")
       fetchAppSettings()
