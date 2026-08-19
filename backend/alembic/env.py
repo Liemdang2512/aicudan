@@ -8,6 +8,7 @@ from alembic import context
 from app.core.config import settings
 from app.db.base import Base
 from app.models import (  # noqa: F401
+    app_setting,
     batch_job,
     bot_session,
     building,
@@ -15,6 +16,7 @@ from app.models import (  # noqa: F401
     price_config,
     reading,
     room,
+    technician_profile,
     user,
 )
 

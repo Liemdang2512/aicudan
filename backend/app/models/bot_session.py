@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -11,6 +11,9 @@ class BotSession(Base):
 
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     bot_type: Mapped[str] = mapped_column(String(20), primary_key=True, default="manager")
+    owner_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     state: Mapped[str] = mapped_column(String(30), default="idle")
     session_data: Mapped[str | None] = mapped_column(Text)

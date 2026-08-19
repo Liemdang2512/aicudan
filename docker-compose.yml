@@ -1,6 +1,24 @@
 version: "3.9"
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aicudan-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aicudan
+      POSTGRES_USER: aicudan
+      POSTGRES_PASSWORD: aicudan
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - aicudan-net
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "aicudan"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: ./backend
@@ -11,13 +29,16 @@ services:
     ports:
       - "8010:8000"
     volumes:
-      - backend_data:/app/data
       - backend_uploads:/app/uploads
     env_file:
       - ./backend/.env
     environment:
       - CORS_ORIGINS=http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003,http://localhost:3004,http://localhost:3005,http://localhost:3010
       - SERVER_URL=https://aicudan.congsu.ai.vn
+      - DATABASE_URL=postgresql+asyncpg://aicudan:aicudan@postgres:5432/aicudan
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - aicudan-net
     healthcheck:
@@ -44,7 +65,7 @@ services:
       - aicudan-net
 
 volumes:
-  backend_data:
+  postgres_data:
   backend_uploads:
 
 networks:

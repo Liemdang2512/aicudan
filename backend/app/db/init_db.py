@@ -1,7 +1,7 @@
 import json
 import logging
 
-from sqlalchemy import inspect, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -26,53 +26,10 @@ logger = logging.getLogger(__name__)
 async def create_tables():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.run_sync(_ensure_invoice_unique_constraint)
-
-
-def _ensure_invoice_unique_constraint(connection) -> None:
-    """Upgrade pre-Alembic databases so invoice idempotency is enforced at DB level."""
-    inspector = inspect(connection)
-    expected_columns = {"room_id", "invoice_month"}
-    unique_constraints = inspector.get_unique_constraints("invoices")
-    unique_indexes = [index for index in inspector.get_indexes("invoices") if index.get("unique")]
-    if any(
-        set(item.get("column_names") or []) == expected_columns
-        for item in [*unique_constraints, *unique_indexes]
-    ):
-        return
-
-    duplicates = connection.execute(
-        text(
-            """
-            SELECT room_id, invoice_month, COUNT(*) AS duplicate_count
-            FROM invoices
-            GROUP BY room_id, invoice_month
-            HAVING COUNT(*) > 1
-            LIMIT 20
-            """
-        )
-    ).mappings().all()
-    if duplicates:
-        details = ", ".join(
-            f"room_id={row['room_id']} month={row['invoice_month']} count={row['duplicate_count']}"
-            for row in duplicates
-        )
-        raise RuntimeError(
-            "Không thể áp dụng ràng buộc hóa đơn duy nhất vì có dữ liệu trùng: " + details
-        )
-
-    connection.execute(
-        text(
-            "CREATE UNIQUE INDEX uq_invoices_room_month "
-            "ON invoices (room_id, invoice_month)"
-        )
-    )
 
 
 async def normalize_price_configs(db: AsyncSession) -> tuple[int, int]:
     """Normalize safely recognized legacy pricing rows; leave ambiguous rows untouched."""
-    from sqlalchemy import select
-
     result = await db.execute(select(PriceConfig))
     normalized_count = 0
     skipped_count = 0
@@ -99,15 +56,9 @@ async def normalize_price_configs(db: AsyncSession) -> tuple[int, int]:
     return normalized_count, skipped_count
 
 
-async def load_settings_from_db(db: AsyncSession) -> None:
-    """Load app settings from DB into the runtime settings object.
-
-    Called on startup so that GEMINI_API_KEY, TELEGRAM_BOT_TOKEN and payment
-    fields saved via the UI override any .env defaults without requiring a restart.
-    """
-    from sqlalchemy import select
-
-    result = await db.execute(select(AppSetting).where(AppSetting.id == 1))
+async def load_settings_from_db(db: AsyncSession, owner_id: int) -> None:
+    """Load app settings for a specific owner from DB into the runtime settings object."""
+    result = await db.execute(select(AppSetting).where(AppSetting.owner_id == owner_id))
     row = result.scalar_one_or_none()
     if row is None:
         return
@@ -129,12 +80,10 @@ async def load_settings_from_db(db: AsyncSession) -> None:
         settings.TELEGRAM_KTV_PASSWORD = row.telegram_ktv_password
     if row.manager_telegram_chat_id:
         settings.MANAGER_TELEGRAM_CHAT_ID = row.manager_telegram_chat_id
-    logger.info("App settings loaded from database")
+    logger.info("App settings loaded from database for owner_id=%s", owner_id)
 
 
 async def seed_data(db: AsyncSession):
-    from sqlalchemy import select
-
     await normalize_price_configs(db)
 
     # Check if admin exists
@@ -147,7 +96,7 @@ async def seed_data(db: AsyncSession):
             existing_admin.password_hash = hash_password(settings.ADMIN_PASSWORD)
             await db.commit()
             logger.warning("Rotated legacy seeded admin password during production startup")
-        await _ensure_app_settings(db)
+        await _ensure_app_settings(db, existing_admin.id)
         return
 
     # Create admin user
@@ -190,20 +139,18 @@ async def seed_data(db: AsyncSession):
     )
     db.add(fixed_config)
 
+    await db.flush()  # flush to get admin.id before _ensure_app_settings
+    await _ensure_app_settings(db, admin.id)
     await db.commit()
 
-    await _ensure_app_settings(db)
 
-
-async def _ensure_app_settings(db: AsyncSession) -> None:
-    """Seed app_settings row id=1 from env if not yet in DB, then load into runtime settings."""
-    from sqlalchemy import select
-
-    result = await db.execute(select(AppSetting).where(AppSetting.id == 1))
+async def _ensure_app_settings(db: AsyncSession, owner_id: int) -> None:
+    """Seed app_settings row for owner_id from env if not yet in DB, then load into runtime settings."""
+    result = await db.execute(select(AppSetting).where(AppSetting.owner_id == owner_id))
     if result.scalar_one_or_none() is None:
         db.add(
             AppSetting(
-                id=1,
+                owner_id=owner_id,
                 gemini_api_key=settings.GEMINI_API_KEY,
                 telegram_bot_token=settings.TELEGRAM_BOT_TOKEN,
                 payment_management_unit=settings.PAYMENT_MANAGEMENT_UNIT,
@@ -215,7 +162,7 @@ async def _ensure_app_settings(db: AsyncSession) -> None:
                 manager_telegram_chat_id=settings.MANAGER_TELEGRAM_CHAT_ID,
             )
         )
-        await db.commit()
-        logger.info("App settings seeded from environment variables")
+        await db.flush()
+        logger.info("App settings seeded from environment variables for owner_id=%s", owner_id)
 
-    await load_settings_from_db(db)
+    await load_settings_from_db(db, owner_id)

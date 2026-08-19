@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -9,7 +9,10 @@ from app.db.base import Base
 class AppSetting(Base):
     __tablename__ = "app_settings"
 
-    id: Mapped[int] = mapped_column(primary_key=True, default=1)  # always 1
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
     gemini_api_key: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     telegram_bot_token: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     payment_management_unit: Mapped[str] = mapped_column(String(200), nullable=False, default="")

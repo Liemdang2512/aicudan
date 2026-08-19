@@ -12,20 +12,22 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import UTC, date, datetime
+from dataclasses import dataclass
+from datetime import date
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import async_session
+from app.models.app_setting import AppSetting
 from app.models.bot_session import BotSession
 from app.models.building import Building
-from app.models.room import Room
 from app.models.reading import MeterReading
+from app.models.room import Room
 from app.models.technician_profile import TechnicianProfile
 from app.services.ai_service import AIService
 
@@ -59,18 +61,27 @@ CB_KTV_SUMMARY_OK = "k:sok"
 CB_KTV_CANCEL = "k:cancel"
 CB_KTV_BUILDING_PREFIX = "k:b:"
 
+
+# ---------------------------------------------------------------------------
+# Owner context
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OwnerContext:
+    owner_id: int
+    ktv_bot_token: str
+    ktv_password: str
+    manager_bot_token: str
+    manager_chat_id: str
+
+
 # ---------------------------------------------------------------------------
 # Low-level Telegram API helpers
 # ---------------------------------------------------------------------------
 
-def _ktv_token() -> str:
-    return settings.TELEGRAM_KTV_BOT_TOKEN
-
-
-async def _ktv_api(method: str, **kwargs) -> dict | None:
-    token = _ktv_token()
+async def _ktv_api(token: str, method: str, **kwargs) -> dict | None:
     if not token:
-        logger.warning("TELEGRAM_KTV_BOT_TOKEN chưa được cấu hình")
+        logger.warning("KTV bot token chưa được cấu hình")
         return None
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -81,34 +92,33 @@ async def _ktv_api(method: str, **kwargs) -> dict | None:
         return None
 
 
-async def _ktv_send(chat_id: int, text: str, reply_markup: dict | None = None) -> int | None:
+async def _ktv_send(token: str, chat_id: int, text: str, reply_markup: dict | None = None) -> int | None:
     payload = {"chat_id": chat_id, "text": text}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    result = await _ktv_api("sendMessage", **payload)
+    result = await _ktv_api(token, "sendMessage", **payload)
     if result and result.get("ok"):
         return result["result"]["message_id"]
     return None
 
 
-async def _ktv_send_photo(chat_id: int, file_id: str, caption: str, reply_markup: dict | None = None) -> int | None:
-    """Gửi ảnh kèm caption và inline keyboard (dùng file_id từ Telegram)."""
+async def _ktv_send_photo(
+    token: str, chat_id: int, file_id: str, caption: str, reply_markup: dict | None = None
+) -> int | None:
     payload = {"chat_id": chat_id, "photo": file_id, "caption": caption}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    result = await _ktv_api("sendPhoto", **payload)
+    result = await _ktv_api(token, "sendPhoto", **payload)
     if result and result.get("ok"):
         return result["result"]["message_id"]
-    # Fallback: nếu sendPhoto lỗi, gửi text
-    return await _ktv_send(chat_id, caption, reply_markup)
+    return await _ktv_send(token, chat_id, caption, reply_markup)
 
 
-async def _ktv_answer_callback(callback_query_id: str, text: str = "") -> None:
-    await _ktv_api("answerCallbackQuery", callback_query_id=callback_query_id, text=text)
+async def _ktv_answer_callback(token: str, callback_query_id: str, text: str = "") -> None:
+    await _ktv_api(token, "answerCallbackQuery", callback_query_id=callback_query_id, text=text)
 
 
-async def _ktv_download_photo(file_id: str) -> bytes | None:
-    token = _ktv_token()
+async def _ktv_download_photo(token: str, file_id: str) -> bytes | None:
     if not token:
         return None
     try:
@@ -129,10 +139,10 @@ async def _ktv_download_photo(file_id: str) -> bytes | None:
         return None
 
 
-async def _manager_api(method: str, **kwargs) -> dict | None:
-    token = settings.TELEGRAM_BOT_TOKEN
+async def _manager_api(owner_ctx: OwnerContext, method: str, **kwargs) -> dict | None:
+    token = owner_ctx.manager_bot_token
     if not token:
-        logger.warning("TELEGRAM_BOT_TOKEN chưa được cấu hình")
+        logger.warning("Manager bot token chưa được cấu hình (owner_id=%s)", owner_ctx.owner_id)
         return None
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -160,13 +170,15 @@ def _save_data(session: BotSession, data: dict) -> None:
     session.session_data = json.dumps(data, ensure_ascii=False)
 
 
-async def _get_ktv_session(db: AsyncSession, chat_id: int) -> BotSession:
+async def _get_ktv_session(db: AsyncSession, chat_id: int, owner_id: int) -> BotSession:
     result = await db.execute(
         select(BotSession).where(BotSession.chat_id == chat_id, BotSession.bot_type == "ktv")
     )
     session = result.scalar_one_or_none()
     if not session:
-        session = BotSession(chat_id=chat_id, bot_type="ktv", state=KTV_IDLE, is_admin=False)
+        session = BotSession(
+            chat_id=chat_id, bot_type="ktv", state=KTV_IDLE, is_admin=False, owner_id=owner_id
+        )
         db.add(session)
         await db.flush()
     return session
@@ -181,14 +193,19 @@ async def _get_profile(db: AsyncSession, chat_id: int) -> TechnicianProfile | No
     return r.scalar_one_or_none()
 
 
-async def _save_profile(db: AsyncSession, chat_id: int, ktv_name: str, ktv_phone: str) -> TechnicianProfile:
+async def _save_profile(
+    db: AsyncSession, chat_id: int, ktv_name: str, ktv_phone: str, owner_id: int
+) -> TechnicianProfile:
     r = await db.execute(select(TechnicianProfile).where(TechnicianProfile.chat_id == chat_id))
     profile = r.scalar_one_or_none()
     if profile:
         profile.ktv_name = ktv_name
         profile.ktv_phone = ktv_phone
+        profile.owner_id = owner_id
     else:
-        profile = TechnicianProfile(chat_id=chat_id, ktv_name=ktv_name, ktv_phone=ktv_phone)
+        profile = TechnicianProfile(
+            chat_id=chat_id, ktv_name=ktv_name, ktv_phone=ktv_phone, owner_id=owner_id
+        )
         db.add(profile)
     await db.flush()
     return profile
@@ -265,10 +282,10 @@ def _parse_month(text: str) -> str | None:
 # Command handlers
 # ---------------------------------------------------------------------------
 
-async def _cmd_ktv_start(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+async def _cmd_ktv_start(chat_id: int, session: BotSession, db: AsyncSession, token: str) -> None:
     if session.is_admin:
         await _ktv_send(
-            chat_id,
+            token, chat_id,
             "✅ Đã xác thực. Lệnh:\n"
             "/baodien — Bắt đầu phiên\n"
             "/capnhat — Cập nhật thông tin\n"
@@ -277,19 +294,22 @@ async def _cmd_ktv_start(chat_id: int, session: BotSession, db: AsyncSession) ->
         )
     else:
         await _ktv_send(
-            chat_id,
+            token, chat_id,
             "Bot báo điện dành cho Kỹ Thuật Viên.\n\n"
             "Xác thực: /ktv MẬT_KHẨU"
         )
 
 
-async def _cmd_ktv_auth(chat_id: int, text: str, session: BotSession, db: AsyncSession) -> None:
+async def _cmd_ktv_auth(
+    chat_id: int, text: str, session: BotSession, db: AsyncSession, owner_ctx: OwnerContext
+) -> None:
+    token = owner_ctx.ktv_bot_token
     parts = text.split(maxsplit=1)
     if len(parts) < 2:
-        await _ktv_send(chat_id, "Cú pháp: /ktv MẬT_KHẨU")
+        await _ktv_send(token, chat_id, "Cú pháp: /ktv MẬT_KHẨU")
         return
-    if parts[1].strip() != settings.TELEGRAM_KTV_PASSWORD:
-        await _ktv_send(chat_id, "❌ Mật khẩu không đúng.")
+    if parts[1].strip() != owner_ctx.ktv_password:
+        await _ktv_send(token, chat_id, "❌ Mật khẩu không đúng.")
         return
 
     session.is_admin = True
@@ -297,51 +317,59 @@ async def _cmd_ktv_auth(chat_id: int, text: str, session: BotSession, db: AsyncS
     if not profile:
         session.state = KTV_AWAITING_NAME
         await db.commit()
-        await _ktv_send(chat_id, "✅ Xác thực thành công!\n\nĐây là lần đầu bạn dùng bot. Vui lòng nhập tên đầy đủ của bạn:")
+        await _ktv_send(token, chat_id, "✅ Xác thực thành công!\n\nĐây là lần đầu bạn dùng bot. Vui lòng nhập tên đầy đủ của bạn:")
     else:
         session.state = KTV_IDLE
         await db.commit()
-        await _ktv_send(chat_id, f"✅ Xác thực thành công! Chào {profile.ktv_name}!\n\nGõ /baodien để bắt đầu.")
+        await _ktv_send(token, chat_id, f"✅ Xác thực thành công! Chào {profile.ktv_name}!\n\nGõ /baodien để bắt đầu.")
 
 
-async def _cmd_ktv_capnhat(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+async def _cmd_ktv_capnhat(chat_id: int, session: BotSession, db: AsyncSession, token: str) -> None:
     if not session.is_admin:
-        await _ktv_send(chat_id, "Chưa xác thực. Dùng /ktv MẬT_KHẨU")
+        await _ktv_send(token, chat_id, "Chưa xác thực. Dùng /ktv MẬT_KHẨU")
         return
     session.state = KTV_AWAITING_UPDATE_NAME
     await db.commit()
-    await _ktv_send(chat_id, "Nhập tên mới của bạn:")
+    await _ktv_send(token, chat_id, "Nhập tên mới của bạn:")
 
 
-async def _cmd_ktv_baodien(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+async def _cmd_ktv_baodien(
+    chat_id: int, session: BotSession, db: AsyncSession, owner_ctx: OwnerContext
+) -> None:
+    token = owner_ctx.ktv_bot_token
     if not session.is_admin:
-        await _ktv_send(chat_id, "Chưa xác thực. Dùng /ktv MẬT_KHẨU")
+        await _ktv_send(token, chat_id, "Chưa xác thực. Dùng /ktv MẬT_KHẨU")
         return
     profile = await _get_profile(db, chat_id)
     if not profile:
         session.state = KTV_AWAITING_NAME
         await db.commit()
-        await _ktv_send(chat_id, "Vui lòng nhập tên đầy đủ của bạn:")
+        await _ktv_send(token, chat_id, "Vui lòng nhập tên đầy đủ của bạn:")
         return
 
-    result = await db.execute(select(Building).where(Building.is_active == True))  # noqa: E712
+    # Filter buildings by owner_id for tenant isolation
+    result = await db.execute(
+        select(Building).where(
+            Building.is_active == True,  # noqa: E712
+            Building.owner_id == owner_ctx.owner_id,
+        )
+    )
     buildings = result.scalars().all()
     if not buildings:
-        await _ktv_send(chat_id, "❌ Chưa có tòa nhà nào trong hệ thống. Liên hệ quản lý.")
+        await _ktv_send(token, chat_id, "❌ Chưa có tòa nhà nào trong hệ thống. Liên hệ quản lý.")
         return
 
     month = _current_month()
     data = {"pending": None, "month": month}
 
     if len(buildings) == 1:
-        # Auto-chọn tòa duy nhất, bỏ qua bước chọn tháng
         data["building_id"] = buildings[0].id
         data["building_name"] = buildings[0].name
         _save_data(session, data)
         session.state = KTV_COLLECTING
         await db.commit()
         await _ktv_send(
-            chat_id,
+            token, chat_id,
             f"🏢 {buildings[0].name} — Tháng {month}\n\n"
             "📷 Gửi ảnh đồng hồ điện từng phòng.\n"
             "Gõ /xong khi gửi hết.",
@@ -350,12 +378,12 @@ async def _cmd_ktv_baodien(chat_id: int, session: BotSession, db: AsyncSession) 
         _save_data(session, data)
         session.state = KTV_AWAITING_BUILDING
         await db.commit()
-        await _ktv_send(chat_id, f"🏢 Chọn tòa nhà (tháng {month}):", _ktv_building_keyboard(buildings))
+        await _ktv_send(token, chat_id, f"🏢 Chọn tòa nhà (tháng {month}):", _ktv_building_keyboard(buildings))
 
 
-async def _cmd_ktv_xong(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+async def _cmd_ktv_xong(chat_id: int, session: BotSession, db: AsyncSession, token: str) -> None:
     if session.state not in (KTV_COLLECTING, KTV_CONFIRMING):
-        await _ktv_send(chat_id, "Không trong phiên thu ảnh.")
+        await _ktv_send(token, chat_id, "Không trong phiên thu ảnh.")
         return
 
     result = await db.execute(
@@ -366,7 +394,7 @@ async def _cmd_ktv_xong(chat_id: int, session: BotSession, db: AsyncSession) -> 
     )
     readings = result.scalars().all()
     if not readings:
-        await _ktv_send(chat_id, "Chưa có ảnh nào được xác nhận. Gửi ảnh hoặc /huy.")
+        await _ktv_send(token, chat_id, "Chưa có ảnh nào được xác nhận. Gửi ảnh hoặc /huy.")
         return
 
     session.state = KTV_REVIEWING
@@ -391,10 +419,10 @@ async def _cmd_ktv_xong(chat_id: int, session: BotSession, db: AsyncSession) -> 
     lines.append(f"\n✅ {len(readings)} phòng đã ghi nhận.")
     lines.append("Xác nhận để gửi cho quản lý duyệt.")
 
-    await _ktv_send(chat_id, "\n".join(lines), _ktv_summary_keyboard())
+    await _ktv_send(token, chat_id, "\n".join(lines), _ktv_summary_keyboard())
 
 
-async def _cmd_ktv_huy(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+async def _cmd_ktv_huy(chat_id: int, session: BotSession, db: AsyncSession, token: str) -> None:
     await db.execute(
         delete(MeterReading).where(
             MeterReading.status == "pre_staged",
@@ -404,17 +432,19 @@ async def _cmd_ktv_huy(chat_id: int, session: BotSession, db: AsyncSession) -> N
     session.state = KTV_IDLE
     session.session_data = None
     await db.commit()
-    await _ktv_send(chat_id, "✅ Đã hủy phiên. Gõ /baodien để bắt đầu lại.")
+    await _ktv_send(token, chat_id, "✅ Đã hủy phiên. Gõ /baodien để bắt đầu lại.")
 
 
 # ---------------------------------------------------------------------------
 # Text input handlers (state-driven)
 # ---------------------------------------------------------------------------
 
-async def _handle_ktv_name_input(chat_id: int, text: str, session: BotSession, db: AsyncSession) -> None:
+async def _handle_ktv_name_input(
+    chat_id: int, text: str, session: BotSession, db: AsyncSession, token: str
+) -> None:
     text = text.strip()
     if not text or len(text) > 200:
-        await _ktv_send(chat_id, "Tên không hợp lệ. Vui lòng nhập lại:")
+        await _ktv_send(token, chat_id, "Tên không hợp lệ. Vui lòng nhập lại:")
         return
 
     data = _load_data(session)
@@ -423,48 +453,52 @@ async def _handle_ktv_name_input(chat_id: int, text: str, session: BotSession, d
         _save_data(session, data)
         session.state = KTV_AWAITING_PHONE
         await db.commit()
-        await _ktv_send(chat_id, "Số điện thoại của bạn?")
+        await _ktv_send(token, chat_id, "Số điện thoại của bạn?")
     elif session.state == KTV_AWAITING_UPDATE_NAME:
         data["pending_name"] = text
         _save_data(session, data)
         session.state = KTV_AWAITING_UPDATE_PHONE
         await db.commit()
-        await _ktv_send(chat_id, "Số điện thoại mới của bạn? (Enter để giữ nguyên SĐT cũ)")
+        await _ktv_send(token, chat_id, "Số điện thoại mới của bạn? (Enter để giữ nguyên SĐT cũ)")
 
 
-async def _handle_ktv_phone_input(chat_id: int, text: str, session: BotSession, db: AsyncSession) -> None:
+async def _handle_ktv_phone_input(
+    chat_id: int, text: str, session: BotSession, db: AsyncSession, token: str, owner_id: int
+) -> None:
     text = text.strip()
     data = _load_data(session)
     pending_name = data.get("pending_name", "")
 
     if session.state == KTV_AWAITING_PHONE:
         if not text:
-            await _ktv_send(chat_id, "Số điện thoại không được để trống:")
+            await _ktv_send(token, chat_id, "Số điện thoại không được để trống:")
             return
-        await _save_profile(db, chat_id, pending_name, text)
+        await _save_profile(db, chat_id, pending_name, text, owner_id)
         data.pop("pending_name", None)
         _save_data(session, data)
         session.state = KTV_IDLE
         await db.commit()
         await _ktv_send(
-            chat_id,
+            token, chat_id,
             f"✅ Đã lưu thông tin:\nTên: {pending_name}\nSĐT: {text}\n\nGõ /baodien để bắt đầu phiên."
         )
     elif session.state == KTV_AWAITING_UPDATE_PHONE:
         profile = await _get_profile(db, chat_id)
         ktv_phone = text or (profile.ktv_phone if profile else "")
-        await _save_profile(db, chat_id, pending_name, ktv_phone)
+        await _save_profile(db, chat_id, pending_name, ktv_phone, owner_id)
         data.pop("pending_name", None)
         _save_data(session, data)
         session.state = KTV_IDLE
         await db.commit()
-        await _ktv_send(chat_id, f"✅ Đã cập nhật:\nTên: {pending_name}\nSĐT: {ktv_phone}")
+        await _ktv_send(token, chat_id, f"✅ Đã cập nhật:\nTên: {pending_name}\nSĐT: {ktv_phone}")
 
 
-async def _handle_ktv_month_input(chat_id: int, text: str, session: BotSession, db: AsyncSession) -> None:
+async def _handle_ktv_month_input(
+    chat_id: int, text: str, session: BotSession, db: AsyncSession, token: str
+) -> None:
     month = _current_month() if text.lower() in ("", "ok", ".", "enter") else _parse_month(text)
     if not month:
-        await _ktv_send(chat_id, f"❓ Không nhận ra tháng '{text}'. Thử: 8, tháng 8, 08/2026")
+        await _ktv_send(token, chat_id, f"❓ Không nhận ra tháng '{text}'. Thử: 8, tháng 8, 08/2026")
         return
     data = _load_data(session)
     data["month"] = month
@@ -472,20 +506,22 @@ async def _handle_ktv_month_input(chat_id: int, text: str, session: BotSession, 
     session.state = KTV_COLLECTING
     await db.commit()
     await _ktv_send(
-        chat_id,
+        token, chat_id,
         f"✅ Tháng {month}\n\n"
         "📷 Gửi ảnh đồng hồ điện từng phòng.\n"
         "Gõ /xong khi gửi hết."
     )
 
 
-async def _handle_ktv_edit_value_input(chat_id: int, text: str, session: BotSession, db: AsyncSession) -> None:
+async def _handle_ktv_edit_value_input(
+    chat_id: int, text: str, session: BotSession, db: AsyncSession, token: str
+) -> None:
     try:
         value = int(text.strip().replace(",", "").replace(".", ""))
         if value < 0:
             raise ValueError("âm")
     except ValueError:
-        await _ktv_send(chat_id, "❌ Chỉ số phải là số nguyên dương. Nhập lại:")
+        await _ktv_send(token, chat_id, "❌ Chỉ số phải là số nguyên dương. Nhập lại:")
         return
 
     data = _load_data(session)
@@ -498,20 +534,29 @@ async def _handle_ktv_edit_value_input(chat_id: int, text: str, session: BotSess
 
     room_number = pending.get("room_number")
     await _ktv_send(
-        chat_id,
+        token, chat_id,
         f"✏️ Chỉ số: {value:,} kWh\n🚪 Phòng: {room_number or 'Chưa rõ'}",
         _ktv_confirm_keyboard(room_number),
     )
 
 
-async def _handle_ktv_edit_room_input(chat_id: int, text: str, session: BotSession, db: AsyncSession) -> None:
+async def _handle_ktv_edit_room_input(
+    chat_id: int, text: str, session: BotSession, db: AsyncSession, token: str, owner_id: int
+) -> None:
     input_text = text.strip()
     data = _load_data(session)
     building_id = data.get("building_id")
     room: Room | None = None
-    # Thử exact match trước, rồi last word
     for candidate in dict.fromkeys([input_text, input_text.split()[-1]]):
-        q = select(Room).where(Room.room_number == candidate, Room.is_active == True)  # noqa: E712
+        q = (
+            select(Room)
+            .join(Building, Room.building_id == Building.id)
+            .where(
+                Room.room_number == candidate,
+                Room.is_active == True,  # noqa: E712
+                Building.owner_id == owner_id,
+            )
+        )
         if building_id:
             q = q.where(Room.building_id == building_id)
         r = await db.execute(q.limit(1))
@@ -520,7 +565,7 @@ async def _handle_ktv_edit_room_input(chat_id: int, text: str, session: BotSessi
             break
     if not room:
         building_hint = " trong tòa này" if building_id else ""
-        await _ktv_send(chat_id, f"❌ Không tìm thấy phòng '{input_text}'{building_hint}. Nhập lại:")
+        await _ktv_send(token, chat_id, f"❌ Không tìm thấy phòng '{input_text}'{building_hint}. Nhập lại:")
         return
 
     data = _load_data(session)
@@ -534,7 +579,7 @@ async def _handle_ktv_edit_room_input(chat_id: int, text: str, session: BotSessi
 
     meter_value = pending.get("meter_value") or 0
     await _ktv_send(
-        chat_id,
+        token, chat_id,
         f"✏️ Phòng đã sửa: {room.room_number}\n🔢 Chỉ số: {meter_value:,} kWh",
         _ktv_confirm_keyboard(room.room_number),
     )
@@ -544,16 +589,17 @@ async def _handle_ktv_edit_room_input(chat_id: int, text: str, session: BotSessi
 # Photo processor
 # ---------------------------------------------------------------------------
 
-async def _ktv_process_photo(chat_id: int, file_id: str, db: AsyncSession) -> None:
-    session = await _get_ktv_session(db, chat_id)
+async def _ktv_process_photo(chat_id: int, file_id: str, db: AsyncSession, owner_ctx: OwnerContext) -> None:
+    token = owner_ctx.ktv_bot_token
+    session = await _get_ktv_session(db, chat_id, owner_ctx.owner_id)
     if session.state != KTV_COLLECTING:
-        await _ktv_send(chat_id, "Không trong phiên thu ảnh. Gõ /baodien.")
+        await _ktv_send(token, chat_id, "Không trong phiên thu ảnh. Gõ /baodien.")
         return
 
-    await _ktv_send(chat_id, "⏳ Đang đọc ảnh...")
-    photo_data = await _ktv_download_photo(file_id)
+    await _ktv_send(token, chat_id, "⏳ Đang đọc ảnh...")
+    photo_data = await _ktv_download_photo(token, file_id)
     if not photo_data:
-        await _ktv_send(chat_id, "❌ Không tải được ảnh. Thử gửi lại.")
+        await _ktv_send(token, chat_id, "❌ Không tải được ảnh. Thử gửi lại.")
         return
 
     upload_dir = settings.upload_path / "telegram_ktv"
@@ -573,9 +619,16 @@ async def _ktv_process_photo(chat_id: int, file_id: str, db: AsyncSession) -> No
     room: Room | None = None
     if room_number_ai:
         ai_room = room_number_ai.strip()
-        # Thử exact match trước, rồi fallback last word (vd: "B 2543" → "2543")
         for candidate in dict.fromkeys([ai_room, ai_room.split()[-1]]):
-            q = select(Room).where(Room.room_number == candidate, Room.is_active == True)  # noqa: E712
+            q = (
+                select(Room)
+                .join(Building, Room.building_id == Building.id)
+                .where(
+                    Room.room_number == candidate,
+                    Room.is_active == True,  # noqa: E712
+                    Building.owner_id == owner_ctx.owner_id,
+                )
+            )
             if building_id:
                 q = q.where(Room.building_id == building_id)
             r = await db.execute(q.limit(1))
@@ -583,9 +636,6 @@ async def _ktv_process_photo(chat_id: int, file_id: str, db: AsyncSession) -> No
             if room:
                 break
 
-    # Auto-confirm nếu tin cậy cao (≥95%) và tìm được phòng
-    # Dùng INSERT trực tiếp vào DB (pre_staged) thay vì ghi vào session_data JSON
-    # → tránh race condition khi album nhiều ảnh đến đồng thời
     AUTO_CONFIRM_THRESHOLD = 0.95
     if meter_value is not None and room and confidence >= AUTO_CONFIRM_THRESHOLD:
         db.add(MeterReading(
@@ -611,11 +661,11 @@ async def _ktv_process_photo(chat_id: int, file_id: str, db: AsyncSession) -> No
         count = count_result.scalar_one()
         conf_pct = f"{confidence * 100:.0f}%"
         await _ktv_send(
-            chat_id,
+            token, chat_id,
             f"✅ P.{room.room_number}: {meter_value:,} kWh (tin cậy {conf_pct} — tự xác nhận)\n"
             f"({count} phòng)\n\nGửi ảnh tiếp hoặc /xong.",
         )
-        await _ktv_process_queued_photo(chat_id, db)
+        await _ktv_process_queued_photo(chat_id, db, owner_ctx)
         return
 
     data["pending"] = {
@@ -651,16 +701,18 @@ async def _ktv_process_photo(chat_id: int, file_id: str, db: AsyncSession) -> No
         if notes:
             msg += f"\n📝 {notes}"
 
-    await _ktv_send_photo(chat_id, file_id, msg, _ktv_confirm_keyboard(room.room_number if room else room_number_ai))
+    await _ktv_send_photo(
+        token, chat_id, file_id, msg,
+        _ktv_confirm_keyboard(room.room_number if room else room_number_ai)
+    )
 
 
 # ---------------------------------------------------------------------------
 # Photo queue processor
 # ---------------------------------------------------------------------------
 
-async def _ktv_process_queued_photo(chat_id: int, db: AsyncSession) -> None:
-    """Xử lý ảnh tiếp theo trong queue (nếu có) sau khi confirm xong."""
-    session = await _get_ktv_session(db, chat_id)
+async def _ktv_process_queued_photo(chat_id: int, db: AsyncSession, owner_ctx: OwnerContext) -> None:
+    session = await _get_ktv_session(db, chat_id, owner_ctx.owner_id)
     data = _load_data(session)
     queue = data.get("photo_queue") or []
     if not queue or session.state != KTV_COLLECTING:
@@ -669,18 +721,26 @@ async def _ktv_process_queued_photo(chat_id: int, db: AsyncSession) -> None:
     data["photo_queue"] = queue
     _save_data(session, data)
     await db.commit()
-    await _ktv_process_photo(chat_id, next_file_id, db)
+    await _ktv_process_photo(chat_id, next_file_id, db, owner_ctx)
 
 
 # ---------------------------------------------------------------------------
 # Callback handlers
 # ---------------------------------------------------------------------------
 
-async def _cb_ktv_select_building(chat_id: int, building_id: int, session: BotSession, db: AsyncSession) -> None:
-    result = await db.execute(select(Building).where(Building.id == building_id, Building.is_active == True))  # noqa: E712
+async def _cb_ktv_select_building(
+    chat_id: int, building_id: int, session: BotSession, db: AsyncSession, token: str, owner_id: int
+) -> None:
+    result = await db.execute(
+        select(Building).where(
+            Building.id == building_id,
+            Building.is_active == True,  # noqa: E712
+            Building.owner_id == owner_id,
+        )
+    )
     building = result.scalar_one_or_none()
     if not building:
-        await _ktv_send(chat_id, "❌ Tòa nhà không hợp lệ. Thử lại /baodien.")
+        await _ktv_send(token, chat_id, "❌ Tòa nhà không hợp lệ. Thử lại /baodien.")
         return
 
     data = _load_data(session)
@@ -692,21 +752,21 @@ async def _cb_ktv_select_building(chat_id: int, building_id: int, session: BotSe
     session.state = KTV_COLLECTING
     await db.commit()
     await _ktv_send(
-        chat_id,
+        token, chat_id,
         f"🏢 {building.name} — Tháng {month}\n\n"
         "📷 Gửi ảnh đồng hồ điện từng phòng.\n"
         "Gõ /xong khi gửi hết.",
     )
 
 
-async def _cb_ktv_confirm_ok(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+async def _cb_ktv_confirm_ok(chat_id: int, session: BotSession, db: AsyncSession, token: str) -> None:
     data = _load_data(session)
     pending = data.get("pending") or {}
     if pending.get("meter_value") is None:
-        await _ktv_send(chat_id, "⚠️ Chỉ số chưa có. Nhấn ✏️ Sửa chỉ số trước.")
+        await _ktv_send(token, chat_id, "⚠️ Chỉ số chưa có. Nhấn ✏️ Sửa chỉ số trước.")
         return
     if not pending.get("room_id"):
-        await _ktv_send(chat_id, "⚠️ Phòng chưa xác định. Nhấn 🚪 Nhập số phòng trước.")
+        await _ktv_send(token, chat_id, "⚠️ Phòng chưa xác định. Nhấn 🚪 Nhập số phòng trước.")
         return
 
     db.add(MeterReading(
@@ -733,48 +793,51 @@ async def _cb_ktv_confirm_ok(chat_id: int, session: BotSession, db: AsyncSession
     queue = data.get("photo_queue") or []
     queue_msg = f" ({len(queue)} ảnh trong hàng chờ)" if queue else ""
     await _ktv_send(
-        chat_id,
+        token, chat_id,
         f"✅ Đã lưu P.{pending['room_number']}: {pending['meter_value']:,} kWh\n"
         f"({count} phòng){queue_msg}\n\nGửi ảnh tiếp hoặc /xong.",
     )
-    await _ktv_process_queued_photo(chat_id, db)
 
 
-async def _cb_ktv_edit_val(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+async def _cb_ktv_edit_val(chat_id: int, session: BotSession, db: AsyncSession, token: str) -> None:
     session.state = KTV_EDITING_VALUE
     await db.commit()
-    await _ktv_send(chat_id, "✏️ Nhập chỉ số đúng:")
+    await _ktv_send(token, chat_id, "✏️ Nhập chỉ số đúng:")
 
 
-async def _cb_ktv_edit_room(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+async def _cb_ktv_edit_room(chat_id: int, session: BotSession, db: AsyncSession, token: str) -> None:
     session.state = KTV_EDITING_ROOM
     await db.commit()
-    await _ktv_send(chat_id, "🚪 Nhập số phòng đúng:")
+    await _ktv_send(token, chat_id, "🚪 Nhập số phòng đúng:")
 
 
-async def _cb_ktv_skip(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+async def _cb_ktv_skip(chat_id: int, session: BotSession, db: AsyncSession, token: str) -> None:
     data = _load_data(session)
     data["pending"] = None
     _save_data(session, data)
     session.state = KTV_COLLECTING
     await db.commit()
     count = len(data.get("readings") or [])
-    await _ktv_send(chat_id, f"🗑️ Đã bỏ qua. ({count} phòng)\n\nGửi ảnh tiếp hoặc /xong.")
+    await _ktv_send(token, chat_id, f"🗑️ Đã bỏ qua. ({count} phòng)\n\nGửi ảnh tiếp hoặc /xong.")
 
 
-async def _notify_manager(count: int, ktv_name: str, month: str, building_name: str = "") -> None:
-    manager_chat_id = settings.MANAGER_TELEGRAM_CHAT_ID
+async def _notify_manager(
+    count: int, ktv_name: str, month: str, building_name: str, owner_ctx: OwnerContext
+) -> None:
+    manager_chat_id = owner_ctx.manager_chat_id
     if not manager_chat_id:
-        logger.warning("MANAGER_TELEGRAM_CHAT_ID chưa được cấu hình, không thể gửi thông báo cho quản lý.")
+        logger.warning("MANAGER_TELEGRAM_CHAT_ID chưa được cấu hình (owner_id=%s)", owner_ctx.owner_id)
         return
     parts = month.split("-")
     month_display = f"{int(parts[1])}/{parts[0]}" if len(parts) == 2 else month
     building_part = f" — {building_name}" if building_name else ""
     msg = f"📥 Có {count} chỉ số mới từ {ktv_name}, tháng {month_display}{building_part}. Dùng /duyet để xem."
-    await _manager_api("sendMessage", chat_id=int(manager_chat_id), text=msg)
+    await _manager_api(owner_ctx, "sendMessage", chat_id=int(manager_chat_id), text=msg)
 
 
-async def _cb_ktv_summary_ok(chat_id: int, session: BotSession, db: AsyncSession) -> None:
+async def _cb_ktv_summary_ok(
+    chat_id: int, session: BotSession, db: AsyncSession, token: str, owner_ctx: OwnerContext
+) -> None:
     result = await db.execute(
         select(MeterReading).where(
             MeterReading.status == "pre_staged",
@@ -800,49 +863,68 @@ async def _cb_ktv_summary_ok(chat_id: int, session: BotSession, db: AsyncSession
     session.session_data = None
     await db.commit()
 
-    await _ktv_send(chat_id, f"✅ Đã ghi nhận {count} chỉ số tháng {month}.\n\nQuản lý sẽ nhận thông báo để duyệt.")
-    await _notify_manager(count, ktv_name, month, building_name)
+    await _ktv_send(token, chat_id, f"✅ Đã ghi nhận {count} chỉ số tháng {month}.\n\nQuản lý sẽ nhận thông báo để duyệt.")
+    await _notify_manager(count, ktv_name, month, building_name, owner_ctx)
 
 
-async def _handle_ktv_callback(callback_query: dict, db: AsyncSession) -> None:
+async def _handle_ktv_callback(callback_query: dict, db: AsyncSession, owner_ctx: OwnerContext) -> None:
+    token = owner_ctx.ktv_bot_token
     cb_id = callback_query.get("id", "")
     cb_data = callback_query.get("data", "")
     chat_id = callback_query.get("message", {}).get("chat", {}).get("id", 0)
 
-    await _ktv_answer_callback(cb_id)
-    session = await _get_ktv_session(db, chat_id)
+    await _ktv_answer_callback(token, cb_id)
+    session = await _get_ktv_session(db, chat_id, owner_ctx.owner_id)
 
     try:
         if cb_data.startswith(CB_KTV_BUILDING_PREFIX):
             building_id = int(cb_data[len(CB_KTV_BUILDING_PREFIX):])
-            await _cb_ktv_select_building(chat_id, building_id, session, db)
+            await _cb_ktv_select_building(chat_id, building_id, session, db, token, owner_ctx.owner_id)
         elif cb_data == CB_KTV_OK:
-            await _cb_ktv_confirm_ok(chat_id, session, db)
+            await _cb_ktv_confirm_ok(chat_id, session, db, token)
         elif cb_data == CB_KTV_EDIT_VAL:
-            await _cb_ktv_edit_val(chat_id, session, db)
+            await _cb_ktv_edit_val(chat_id, session, db, token)
         elif cb_data == CB_KTV_EDIT_ROOM:
-            await _cb_ktv_edit_room(chat_id, session, db)
+            await _cb_ktv_edit_room(chat_id, session, db, token)
         elif cb_data == CB_KTV_SKIP:
-            await _cb_ktv_skip(chat_id, session, db)
+            await _cb_ktv_skip(chat_id, session, db, token)
         elif cb_data == CB_KTV_SUMMARY_OK:
-            await _cb_ktv_summary_ok(chat_id, session, db)
+            await _cb_ktv_summary_ok(chat_id, session, db, token, owner_ctx)
         elif cb_data == CB_KTV_CANCEL or cb_data == "huy":
-            await _cmd_ktv_huy(chat_id, session, db)
+            await _cmd_ktv_huy(chat_id, session, db, token)
     except Exception:
         logger.exception("KTV callback handler error")
-        await _ktv_send(chat_id, "⚠️ Có lỗi xảy ra.")
+        await _ktv_send(token, chat_id, "⚠️ Có lỗi xảy ra.")
 
 
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
 
-async def _ktv_dispatch(update: dict) -> None:
+async def _ktv_dispatch(update: dict, owner_id: int) -> None:
     async with async_session() as db:
+        # Load owner's AppSetting to build OwnerContext
+        result = await db.execute(
+            select(AppSetting).where(AppSetting.owner_id == owner_id)
+        )
+        app_setting = result.scalar_one_or_none()
+        if app_setting is None:
+            logger.warning("KTV dispatch: AppSetting không tìm thấy cho owner_id=%s", owner_id)
+            return
+
+        owner_ctx = OwnerContext(
+            owner_id=owner_id,
+            ktv_bot_token=app_setting.telegram_ktv_bot_token or "",
+            ktv_password=app_setting.telegram_ktv_password or "",
+            manager_bot_token=app_setting.telegram_bot_token or "",
+            manager_chat_id=app_setting.manager_telegram_chat_id or "",
+        )
+        token = owner_ctx.ktv_bot_token
+
         try:
             callback_query = update.get("callback_query")
             if callback_query:
-                await _handle_ktv_callback(callback_query, db)
+                await _handle_ktv_callback(callback_query, db, owner_ctx)
                 return
 
             message = update.get("message") or update.get("channel_post") or {}
@@ -853,89 +935,93 @@ async def _ktv_dispatch(update: dict) -> None:
 
             text = (message.get("text") or message.get("caption") or "").strip()
             photos = message.get("photo")
-            session = await _get_ktv_session(db, chat_id)
+            session = await _get_ktv_session(db, chat_id, owner_id)
 
             if text.startswith("/huy") or text.startswith("/cancel"):
-                await _cmd_ktv_huy(chat_id, session, db)
+                await _cmd_ktv_huy(chat_id, session, db, token)
                 return
             elif text.startswith("/start"):
-                await _cmd_ktv_start(chat_id, session, db)
+                await _cmd_ktv_start(chat_id, session, db, token)
                 return
             elif text.startswith("/ktv"):
-                await _cmd_ktv_auth(chat_id, text, session, db)
+                await _cmd_ktv_auth(chat_id, text, session, db, owner_ctx)
                 return
 
             if not session.is_admin:
-                await _ktv_send(chat_id, "Bot báo điện dành cho Kỹ Thuật Viên.\n\nXác thực: /ktv MẬT_KHẨU")
+                await _ktv_send(token, chat_id, "Bot báo điện dành cho Kỹ Thuật Viên.\n\nXác thực: /ktv MẬT_KHẨU")
                 return
 
             if text.startswith("/capnhat"):
-                await _cmd_ktv_capnhat(chat_id, session, db)
+                await _cmd_ktv_capnhat(chat_id, session, db, token)
                 return
             elif text.startswith("/baodien"):
-                await _cmd_ktv_baodien(chat_id, session, db)
+                await _cmd_ktv_baodien(chat_id, session, db, owner_ctx)
                 return
             elif text.startswith("/xong"):
-                await _cmd_ktv_xong(chat_id, session, db)
+                await _cmd_ktv_xong(chat_id, session, db, token)
                 return
 
             if photos:
                 largest_photo = max(photos, key=lambda p: p.get("file_size", 0))
                 if session.state == KTV_COLLECTING:
-                    await _ktv_process_photo(chat_id, largest_photo["file_id"], db)
+                    await _ktv_process_photo(chat_id, largest_photo["file_id"], db, owner_ctx)
                 elif session.state == KTV_CONFIRMING:
-                    # Queue ảnh để xử lý sau khi confirm xong
                     data = _load_data(session)
                     queue = data.get("photo_queue") or []
                     queue.append(largest_photo["file_id"])
                     data["photo_queue"] = queue
                     _save_data(session, data)
                     await db.commit()
-                    await _ktv_send(chat_id, f"📥 Đã thêm vào hàng chờ ({len(queue)} ảnh). Xác nhận ảnh trên trước.")
+                    await _ktv_send(token, chat_id, f"📥 Đã thêm vào hàng chờ ({len(queue)} ảnh). Xác nhận ảnh trên trước.")
                 else:
-                    await _ktv_send(chat_id, "Gõ /baodien để bắt đầu thu ảnh.")
+                    await _ktv_send(token, chat_id, "Gõ /baodien để bắt đầu thu ảnh.")
                 return
 
             if session.state in (KTV_AWAITING_NAME, KTV_AWAITING_UPDATE_NAME):
-                await _handle_ktv_name_input(chat_id, text, session, db)
+                await _handle_ktv_name_input(chat_id, text, session, db, token)
             elif session.state in (KTV_AWAITING_PHONE, KTV_AWAITING_UPDATE_PHONE):
-                await _handle_ktv_phone_input(chat_id, text, session, db)
+                await _handle_ktv_phone_input(chat_id, text, session, db, token, owner_id)
             elif session.state == KTV_AWAITING_BUILDING:
-                await _ktv_send(chat_id, "Vui lòng chọn tòa nhà bằng nút bên trên. Gõ /huy để hủy.")
+                await _ktv_send(token, chat_id, "Vui lòng chọn tòa nhà bằng nút bên trên. Gõ /huy để hủy.")
             elif session.state == KTV_AWAITING_MONTH:
-                await _handle_ktv_month_input(chat_id, text, session, db)
+                await _handle_ktv_month_input(chat_id, text, session, db, token)
             elif session.state == KTV_EDITING_VALUE:
-                await _handle_ktv_edit_value_input(chat_id, text, session, db)
+                await _handle_ktv_edit_value_input(chat_id, text, session, db, token)
             elif session.state == KTV_EDITING_ROOM:
-                await _handle_ktv_edit_room_input(chat_id, text, session, db)
+                await _handle_ktv_edit_room_input(chat_id, text, session, db, token, owner_id)
             elif session.state == KTV_COLLECTING:
-                await _ktv_send(chat_id, "Gửi ảnh hoặc /xong.")
+                await _ktv_send(token, chat_id, "Gửi ảnh hoặc /xong.")
             elif session.state == KTV_IDLE:
-                await _ktv_send(chat_id, "Gõ /baodien để bắt đầu.")
+                await _ktv_send(token, chat_id, "Gõ /baodien để bắt đầu.")
             else:
-                await _ktv_send(chat_id, "Sử dụng nút trên màn hình hoặc gõ /huy.")
+                await _ktv_send(token, chat_id, "Sử dụng nút trên màn hình hoặc gõ /huy.")
 
         except Exception:
-            logger.exception("Lỗi trong KTV dispatch")
+            logger.exception("Lỗi trong KTV dispatch (owner_id=%s)", owner_id)
 
 
 # ---------------------------------------------------------------------------
 # Webhook Endpoint
 # ---------------------------------------------------------------------------
 
-@router.post("/ktv/webhook")
+@router.post("/ktv/webhook/{owner_id}")
 async def telegram_ktv_webhook(
+    owner_id: int,
     request: Request,
     background_tasks: BackgroundTasks,
-    x_telegram_bot_api_secret_token: str | None = Header(default=None),
 ) -> dict:
-    webhook_secret = getattr(settings, "TELEGRAM_KTV_WEBHOOK_SECRET", "")
-    if webhook_secret and x_telegram_bot_api_secret_token != webhook_secret:
-        raise HTTPException(status_code=403, detail="Invalid secret token")
+    # Validate owner exists and has KTV configured
+    async with async_session() as db:
+        result = await db.execute(
+            select(AppSetting).where(AppSetting.owner_id == owner_id)
+        )
+        app_setting = result.scalar_one_or_none()
+        if app_setting is None or not app_setting.telegram_ktv_bot_token:
+            raise HTTPException(status_code=404, detail="Owner not found or KTV bot not configured")
 
     try:
         update = await request.json()
     except Exception:
         return {"ok": True}
-    background_tasks.add_task(_ktv_dispatch, update)
+    background_tasks.add_task(_ktv_dispatch, update, owner_id)
     return {"ok": True}

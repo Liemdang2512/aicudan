@@ -69,12 +69,12 @@ def _mask_key(key: str) -> str:
     return key[:4] + "****" + key[-4:]
 
 
-async def _get_or_create_setting(db: AsyncSession) -> AppSetting:
-    result = await db.execute(select(AppSetting).where(AppSetting.id == 1))
+async def _get_or_create_setting(db: AsyncSession, owner_id: int) -> AppSetting:
+    result = await db.execute(select(AppSetting).where(AppSetting.owner_id == owner_id))
     row = result.scalar_one_or_none()
     if row is None:
         row = AppSetting(
-            id=1,
+            owner_id=owner_id,
             gemini_api_key=settings.GEMINI_API_KEY,
             telegram_bot_token=settings.TELEGRAM_BOT_TOKEN,
             payment_management_unit=settings.PAYMENT_MANAGEMENT_UNIT,
@@ -151,7 +151,7 @@ async def get_settings(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    row = await _get_or_create_setting(db)
+    row = await _get_or_create_setting(db, current_user.id)
     return _setting_to_response(row)
 
 
@@ -172,7 +172,7 @@ async def update_settings(
     if data.telegram_ktv_bot_token is not None:
         await _validate_provider("telegram", data.telegram_ktv_bot_token)
 
-    row = await _get_or_create_setting(db)
+    row = await _get_or_create_setting(db, current_user.id)
 
     if data.gemini_api_key is not None:
         row.gemini_api_key = data.gemini_api_key
@@ -237,7 +237,7 @@ async def setup_telegram_webhook(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    row = await _get_or_create_setting(db)
+    row = await _get_or_create_setting(db, current_user.id)
     token = row.telegram_bot_token or settings.TELEGRAM_BOT_TOKEN
     if not token:
         raise HTTPException(status_code=400, detail="Chưa cấu hình Telegram Bot Token")
@@ -276,12 +276,13 @@ async def setup_ktv_telegram_webhook(
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    row = await _get_or_create_setting(db)
+    row = await _get_or_create_setting(db, current_user.id)
     token = row.telegram_ktv_bot_token or settings.TELEGRAM_KTV_BOT_TOKEN
     if not token:
         raise HTTPException(status_code=400, detail="Chưa cấu hình KTV Bot Token")
     server_url = data.server_url.rstrip("/")
-    webhook_url = f"{server_url}/api/v1/telegram/ktv/webhook"
+    # Per-tenant KTV webhook URL uses owner_id path param
+    webhook_url = f"{server_url}/api/v1/telegram/ktv/webhook/{current_user.id}"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(
@@ -305,7 +306,7 @@ async def validate_settings(
 ):
     credential = data.credential
     if credential is None:
-        row = await _get_or_create_setting(db)
+        row = await _get_or_create_setting(db, current_user.id)
         credential = (
             row.gemini_api_key if data.provider == "gemini" else row.telegram_bot_token
         ) or (

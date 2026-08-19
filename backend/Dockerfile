@@ -20,7 +20,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libpng-dev \
     zlib1g-dev \
     libffi-dev \
-    libssl-dev
+    libssl-dev \
+    libpq-dev
 
 # Copy uv binary từ image chính thức
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -80,7 +81,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libpng16-16 \
     zlib1g \
     libffi8 \
-    libssl3
+    libssl3 \
+    libpq5
 
 # Strip Python stdlib modules không bao giờ cần trong server context:
 #

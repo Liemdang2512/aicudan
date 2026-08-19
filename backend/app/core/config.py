@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     APP_VERSION: str = "0.1.0"
 
     # Database
-    DATABASE_URL: str = "sqlite+aiosqlite:///./data/app.db"
+    DATABASE_URL: str = "postgresql+asyncpg://aicudan:aicudan@localhost:5432/aicudan"
 
     # JWT
     SECRET_KEY: str = "change-me-in-production"

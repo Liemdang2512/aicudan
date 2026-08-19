@@ -13,11 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _stamp_alembic_if_fresh() -> None:
-    """Sau create_all trên fresh DB, stamp alembic_version = head.
-
-    Cần thiết khi entrypoint.sh bỏ qua alembic upgrade (no DB file).
-    Đảm bảo lần deploy tiếp theo alembic biết DB đã ở trạng thái mới nhất.
-    """
+    """Sau create_all trên fresh DB, stamp alembic_version = head."""
     try:
         from alembic.config import Config
         from alembic.runtime.migration import MigrationContext
@@ -43,8 +39,7 @@ async def _stamp_alembic_if_fresh() -> None:
 async def _hydrate_settings_from_db() -> None:
     """Nạp cài đặt từ app_settings DB vào settings in-memory.
 
-    Đảm bảo sau container restart, notification_service và các service khác
-    dùng token đã được cập nhật qua UI thay vì token cũ trong .env.
+    Load từ owner đầu tiên (non-admin ưu tiên, fallback any user).
     """
     import os
 
@@ -52,10 +47,29 @@ async def _hydrate_settings_from_db() -> None:
         from sqlalchemy import select
 
         from app.models.app_setting import AppSetting
+        from app.models.user import User
 
         async with async_session() as db:
-            result = await db.execute(select(AppSetting).where(AppSetting.id == 1))
+            # Try first non-admin owner
+            result = await db.execute(
+                select(AppSetting)
+                .join(User, AppSetting.owner_id == User.id)
+                .where(User.role != "admin")
+                .order_by(User.id)
+                .limit(1)
+            )
             row = result.scalar_one_or_none()
+
+            if row is None:
+                # Fallback: first user of any role
+                result = await db.execute(
+                    select(AppSetting)
+                    .join(User, AppSetting.owner_id == User.id)
+                    .order_by(User.id)
+                    .limit(1)
+                )
+                row = result.scalar_one_or_none()
+
             if row is None:
                 return
 
@@ -76,7 +90,7 @@ async def _hydrate_settings_from_db() -> None:
                     setattr(settings, settings_attr, value)
                     os.environ[env_key] = value
 
-            logger.info("Settings hydrated from app_settings DB")
+            logger.info("Settings hydrated from app_settings DB (owner_id=%s)", row.owner_id)
     except Exception as exc:
         logger.warning("Could not hydrate settings from DB: %s", exc)
 
@@ -88,6 +102,10 @@ async def _auto_register_webhooks() -> None:
         return
 
     import httpx
+
+    from sqlalchemy import select
+
+    from app.models.app_setting import AppSetting
 
     async def _set_webhook(token: str, path: str, allowed_updates: list[str]) -> None:
         url = f"https://api.telegram.org/bot{token}/setWebhook"
@@ -103,18 +121,30 @@ async def _auto_register_webhooks() -> None:
         except Exception as exc:
             logger.warning("Không thể đăng ký Telegram webhook %s: %s", webhook_url, exc)
 
+    # Manager bot: use global settings (single webhook)
     if settings.TELEGRAM_BOT_TOKEN:
         await _set_webhook(
             settings.TELEGRAM_BOT_TOKEN,
             "/api/v1/telegram/webhook",
             ["message"],
         )
-    if settings.TELEGRAM_KTV_BOT_TOKEN:
-        await _set_webhook(
-            settings.TELEGRAM_KTV_BOT_TOKEN,
-            "/api/v1/telegram/ktv/webhook",
-            ["message", "callback_query"],
-        )
+
+    # KTV bot: per-tenant webhook — iterate all owners with KTV token configured
+    try:
+        async with async_session() as db:
+            result = await db.execute(
+                select(AppSetting).where(AppSetting.telegram_ktv_bot_token != "")
+            )
+            owner_settings = result.scalars().all()
+            for row in owner_settings:
+                if row.telegram_ktv_bot_token:
+                    await _set_webhook(
+                        row.telegram_ktv_bot_token,
+                        f"/api/v1/telegram/ktv/webhook/{row.owner_id}",
+                        ["message", "callback_query"],
+                    )
+    except Exception as exc:
+        logger.warning("Không thể đăng ký KTV webhooks: %s", exc)
 
 
 @asynccontextmanager
