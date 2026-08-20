@@ -5,12 +5,30 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import app.api.v1.notifications as notifications_api
+from app.models.app_setting import AppSetting
 from app.models.batch_job import BatchJob
 from app.models.invoice import Invoice
 from app.models.room import Room
 from app.services import notification_service
 
 run_notifications_task = notifications_api.send_notifications_task
+
+
+@pytest.mark.asyncio
+async def test_explicit_empty_owner_token_does_not_fallback_to_global(monkeypatch):
+    monkeypatch.setattr(
+        notification_service.settings,
+        "TELEGRAM_BOT_TOKEN",
+        "another-owner-token",
+    )
+
+    sent = await notification_service.send_telegram_message(
+        "chat-id",
+        "message",
+        token="",
+    )
+
+    assert sent is False
 
 
 async def _create_invoice(
@@ -164,13 +182,25 @@ async def test_worker_completes_with_sent_missing_id_and_provider_failure(
 
     observed_job_statuses: list[str] = []
     provider_calls: list[str] = []
+    provider_tokens: list[str | None] = []
     rate_limit_calls = 0
     worker_session_factory = async_sessionmaker(
         db_session.bind, class_=AsyncSession, expire_on_commit=False
     )
 
-    async def fake_send(chat_id: str, text: str, photo_path: str | None) -> bool:
+    db_session.add(
+        AppSetting(owner_id=test_user.id, telegram_bot_token="owner-manager-token")
+    )
+    await db_session.commit()
+
+    async def fake_send(
+        chat_id: str,
+        text: str,
+        photo_path: str | None,
+        token: str | None = None,
+    ) -> bool:
         provider_calls.append(chat_id)
+        provider_tokens.append(token)
         async with worker_session_factory() as session:
             job = (
                 await session.execute(
@@ -208,6 +238,7 @@ async def test_worker_completes_with_sent_missing_id_and_provider_failure(
     assert completed.json()["failed"] == 2
     assert observed_job_statuses == ["processing", "processing"]
     assert provider_calls == ["chat-success", "chat-provider-fail"]
+    assert provider_tokens == ["owner-manager-token", "owner-manager-token"]
     assert rate_limit_calls == 2
 
     for invoice, expected in (

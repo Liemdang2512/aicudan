@@ -79,14 +79,14 @@ async def _get_or_create_setting(db: AsyncSession, owner_id: int) -> AppSetting:
         row = AppSetting(
             owner_id=owner_id,
             gemini_api_key=settings.GEMINI_API_KEY,
-            telegram_bot_token=settings.TELEGRAM_BOT_TOKEN,
+            telegram_bot_token="",
             payment_management_unit=settings.PAYMENT_MANAGEMENT_UNIT,
             payment_bank_account=settings.PAYMENT_BANK_ACCOUNT,
             payment_bank_name=settings.PAYMENT_BANK_NAME,
             payment_account_holder=settings.PAYMENT_ACCOUNT_HOLDER,
-            telegram_ktv_bot_token=settings.TELEGRAM_KTV_BOT_TOKEN,
-            telegram_ktv_password=settings.TELEGRAM_KTV_PASSWORD,
-            manager_telegram_chat_id=settings.MANAGER_TELEGRAM_CHAT_ID,
+            telegram_ktv_bot_token="",
+            telegram_ktv_password="",
+            manager_telegram_chat_id="",
         )
         db.add(row)
         await db.commit()
@@ -184,23 +184,15 @@ async def update_settings(
 
     if data.telegram_bot_token is not None:
         row.telegram_bot_token = data.telegram_bot_token
-        settings.TELEGRAM_BOT_TOKEN = data.telegram_bot_token
-        os.environ["TELEGRAM_BOT_TOKEN"] = data.telegram_bot_token
 
     if data.telegram_ktv_bot_token is not None:
         row.telegram_ktv_bot_token = data.telegram_ktv_bot_token
-        settings.TELEGRAM_KTV_BOT_TOKEN = data.telegram_ktv_bot_token
-        os.environ["TELEGRAM_KTV_BOT_TOKEN"] = data.telegram_ktv_bot_token
 
     if data.telegram_ktv_password is not None:
         row.telegram_ktv_password = data.telegram_ktv_password
-        settings.TELEGRAM_KTV_PASSWORD = data.telegram_ktv_password
-        os.environ["TELEGRAM_KTV_PASSWORD"] = data.telegram_ktv_password
 
     if data.manager_telegram_chat_id is not None:
         row.manager_telegram_chat_id = data.manager_telegram_chat_id
-        settings.MANAGER_TELEGRAM_CHAT_ID = data.manager_telegram_chat_id
-        os.environ["MANAGER_TELEGRAM_CHAT_ID"] = data.manager_telegram_chat_id
 
     simple_fields = {
         "payment_management_unit": "PAYMENT_MANAGEMENT_UNIT",
@@ -263,7 +255,7 @@ async def setup_telegram_webhook(
     db: AsyncSession = Depends(get_db),
 ):
     row = await _get_or_create_setting(db, current_user.id)
-    token = row.telegram_bot_token or settings.TELEGRAM_BOT_TOKEN
+    token = row.telegram_bot_token
     if not token:
         raise HTTPException(status_code=400, detail="Chưa cấu hình Telegram Bot Token")
 
@@ -302,7 +294,7 @@ async def setup_ktv_telegram_webhook(
     db: AsyncSession = Depends(get_db),
 ):
     row = await _get_or_create_setting(db, current_user.id)
-    token = row.telegram_ktv_bot_token or settings.TELEGRAM_KTV_BOT_TOKEN
+    token = row.telegram_ktv_bot_token
     if not token:
         raise HTTPException(status_code=400, detail="Chưa cấu hình KTV Bot Token")
     server_url = data.server_url.rstrip("/")
@@ -332,11 +324,10 @@ async def validate_settings(
     credential = data.credential
     if credential is None:
         row = await _get_or_create_setting(db, current_user.id)
-        credential = (
-            row.gemini_api_key if data.provider == "gemini" else row.telegram_bot_token
-        ) or (
-            settings.GEMINI_API_KEY if data.provider == "gemini" else settings.TELEGRAM_BOT_TOKEN
-        )
+        if data.provider == "gemini":
+            credential = row.gemini_api_key or settings.GEMINI_API_KEY
+        else:
+            credential = row.telegram_bot_token
     account_name = await _validate_provider(data.provider, credential)
     return ValidateSettingsResponse(
         provider=data.provider,

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+
 import httpx
 
 from app.core.config import settings
@@ -75,7 +76,7 @@ def format_invoice_message(
 
 
 async def send_telegram_message(chat_id: str, text: str, photo_path: str | None = None, token: str | None = None) -> bool:
-    effective_token = token or settings.TELEGRAM_BOT_TOKEN
+    effective_token = settings.TELEGRAM_BOT_TOKEN if token is None else token
     if not effective_token:
         logger.warning("Telegram bot token not configured")
         return False

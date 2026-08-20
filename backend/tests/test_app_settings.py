@@ -82,3 +82,48 @@ async def test_settings_update_saves_to_db_and_masks_secret(
     assert payload["gemini_api_key_set"] is True
     assert secret not in payload["gemini_api_key_masked"]
     assert payload["gemini_api_key_masked"] != secret
+
+
+@pytest.mark.asyncio
+async def test_telegram_settings_are_isolated_between_accounts(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    second_auth_headers: dict[str, str],
+    monkeypatch,
+):
+    async def accept_provider(provider, credential):
+        return None
+
+    monkeypatch.setattr(app_settings, "_validate_provider", accept_provider)
+    monkeypatch.setattr(app_settings.settings, "SERVER_URL", "")
+    monkeypatch.setattr(app_settings.settings, "TELEGRAM_BOT_TOKEN", "legacy-manager-token")
+    monkeypatch.setattr(app_settings.settings, "TELEGRAM_KTV_BOT_TOKEN", "legacy-ktv-token")
+    monkeypatch.setattr(app_settings.settings, "TELEGRAM_KTV_PASSWORD", "legacy-password")
+    monkeypatch.setattr(app_settings.settings, "MANAGER_TELEGRAM_CHAT_ID", "legacy-chat")
+
+    first = await client.patch(
+        "/api/v1/settings",
+        headers=auth_headers,
+        json={
+            "telegram_bot_token": "1111:first-manager-aaaa",
+            "telegram_ktv_bot_token": "2222:first-ktv-bbbb",
+            "telegram_ktv_password": "first-password",
+            "manager_telegram_chat_id": "11111111",
+        },
+    )
+    assert first.status_code == 200
+
+    second = await client.get("/api/v1/settings", headers=second_auth_headers)
+    assert second.status_code == 200
+    second_payload = second.json()
+    assert second_payload["telegram_bot_token_set"] is False
+    assert second_payload["telegram_bot_token_masked"] == ""
+    assert second_payload["telegram_ktv_bot_token_set"] is False
+    assert second_payload["telegram_ktv_bot_token_masked"] == ""
+    assert second_payload["telegram_ktv_password_set"] is False
+    assert second_payload["manager_telegram_chat_id"] == ""
+
+    assert app_settings.settings.TELEGRAM_BOT_TOKEN == "legacy-manager-token"
+    assert app_settings.settings.TELEGRAM_KTV_BOT_TOKEN == "legacy-ktv-token"
+    assert app_settings.settings.TELEGRAM_KTV_PASSWORD == "legacy-password"
+    assert app_settings.settings.MANAGER_TELEGRAM_CHAT_ID == "legacy-chat"

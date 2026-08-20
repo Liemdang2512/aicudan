@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.db.session import async_session, get_db
+from app.models.app_setting import AppSetting
 from app.models.batch_job import BatchJob
 from app.models.building import Building
 from app.models.invoice import Invoice
@@ -82,6 +83,12 @@ async def send_notifications_task(
             await db.commit()
             await db.refresh(job)
 
+            setting_result = await db.execute(
+                select(AppSetting).where(AppSetting.owner_id == owner_id)
+            )
+            owner_setting = setting_result.scalar_one_or_none()
+            telegram_token = owner_setting.telegram_bot_token if owner_setting else ""
+
             for index, inv_id in enumerate(invoice_ids):
                 item_result = {"invoice_id": inv_id, "status": "failed"}
                 invoice = None
@@ -146,7 +153,7 @@ async def send_notifications_task(
                                 photo_path = reading.image_path
 
                         success = await send_telegram_message(
-                            room.telegram_id, message, photo_path
+                            room.telegram_id, message, photo_path, token=telegram_token
                         )
                         if success:
                             invoice.sent_status = "sent"
